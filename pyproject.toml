@@ -1,0 +1,22 @@
+[project]
+name = "agent-dispatch-system"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.16.4",
+    "asyncmy>=0.2.10",
+    "colorlog>=6.9.0",
+    "fastapi>=0.116.1",
+    "greenlet>=3.2.4",
+    "openai-agents>=0.2.5",
+    "pydantic-settings>=2.10.1",
+    "pymysql>=1.1.1",
+    "pytz>=2025.2",
+    "redis[hiredis]>=6.4.0",
+    "ruff>=0.12.8",
+    "socksio>=1.0.0",
+    "sqlalchemy>=2.0.42",
+    "uvicorn>=0.35.0",
+]
