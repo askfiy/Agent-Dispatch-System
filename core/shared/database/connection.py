@@ -5,7 +5,7 @@ from core.config import env_helper
 
 engine = create_async_engine(
     env_helper.ASYNC_DB_URL,
-    # echo=True,
+    echo=False,
 )
 
 

@@ -1,11 +1,17 @@
+import uuid
 from typing import Any
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.engine import Connection
-from sqlalchemy.orm import DeclarativeBase, Mapped, Mapper, mapped_column
 from sqlalchemy.orm.attributes import get_history
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Mapper,
+    mapped_column,
+)
 
 
 class BaseTableScheme(DeclarativeBase):
@@ -57,6 +63,19 @@ class BaseTableScheme(DeclarativeBase):
             else 1,
         )
         return sa.Table(table_name, metadata, *columns, **kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        result = {}
+        for column in self.__table__.columns:
+            value = getattr(self, column.name)
+            if isinstance(value, datetime):
+                result[column.name] = value.isoformat()
+            elif isinstance(value, uuid.UUID):
+                result[column.name] = str(value)
+            else:
+                result[column.name] = value
+
+        return result
 
 
 @event.listens_for(BaseTableScheme, "before_update", propagate=True)

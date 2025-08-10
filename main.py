@@ -41,8 +41,7 @@ app.add_exception_handler(ServiceException, service_exception_handler)
 async def g_trace(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
-    trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4()
-    g.trace_id = uuid.UUID(str(trace_id))
+    g.trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
     response = await call_next(request)
     response.headers["X-Trace-Id"] = str(g.trace_id)
     return response

@@ -11,3 +11,7 @@ class ServiceNotFoundException(ServiceException):
 class ServiceMissMessageException(ServiceException):
     """缺少信息"""
     pass
+
+class ServiceInvalidMessageException(ServiceException):
+    """无效信息"""
+    pass

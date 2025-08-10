@@ -6,6 +6,7 @@ from core.shared.models.http import ResponseModel
 from core.shared.exceptions import (
     ServiceNotFoundException,
     ServiceMissMessageException,
+    ServiceInvalidMessageException
 )
 
 
@@ -15,7 +16,9 @@ async def service_exception_handler(request: Request, exc: Exception):
 
     if isinstance(exc, ServiceNotFoundException):
         status_code = fastapi.status.HTTP_404_NOT_FOUND
-    if isinstance(exc, ServiceMissMessageException):
+    elif isinstance(exc, ServiceMissMessageException):
+        status_code = fastapi.status.HTTP_400_BAD_REQUEST
+    elif isinstance(exc, ServiceInvalidMessageException):
         status_code = fastapi.status.HTTP_400_BAD_REQUEST
 
     return JSONResponse(

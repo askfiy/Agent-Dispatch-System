@@ -1,11 +1,9 @@
-
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar
 
 from agents import (
     Agent as BasicAgent,
     Model,
-    ModelSettings,
     RunContextWrapper,
     Runner,
     TContext,
@@ -15,9 +13,11 @@ from agents.items import TResponseInputItem
 from agents.result import RunResult, RunResultStreaming
 from agents.util._types import MaybeAwaitable
 
-from core.shared.base.models import BaseModel, LLMOutputModel
+from core.shared.base.models import LLMOutputModel
 
 from ..redis.session import RSession
+
+OutputSchemaType = TypeVar("OutputSchemaType", LLMOutputModel, AgentOutputSchemaBase)
 
 
 class Agent:
@@ -59,7 +59,7 @@ class Agent:
         self,
         input: str | list[TResponseInputItem],
         session: RSession | None = None,
-        output_type: type[BaseModel] | AgentOutputSchemaBase | None = None,
+        output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
     ) -> RunResultStreaming:
         agent = self.agent.clone(output_type=output_type, **kwargs)
@@ -67,15 +67,19 @@ class Agent:
 
     async def run(
         self,
-        input: str | list[TResponseInputItem],
+        input: str | list[dict[str, Any]],
         session: RSession | None = None,
-        output_type: type[LLMOutputModel] | AgentOutputSchemaBase | None = None,
+        output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
-    ) -> RunResult:
+    ) -> RunResult | OutputSchemaType:
         agent = self.agent.clone(output_type=output_type, **kwargs)
         run_result = await Runner.run(
             agent,
-            input=input,
+            input=input,  # pyright: ignore[reportArgumentType]
             session=session or self.session,
         )
+
+        if output_type is not None:
+            return run_result.final_output_as(output_type)
+
         return run_result

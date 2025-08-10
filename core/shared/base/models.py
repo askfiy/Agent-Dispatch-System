@@ -44,6 +44,9 @@ class BaseModel(pydantic.BaseModel):
     def pretty_json(self):
         return self.model_dump_json(indent=2)
 
+    def to_json_markdown(self):
+        return f"```json\n{self.pretty_json()}\n```\n"
+
 
 class LLMTimeField(BaseModel):
     """
@@ -180,3 +183,4 @@ class LLMOutputModel(BaseModel):
         if inspect.isclass(tp) and issubclass(tp, BaseModel):
             return tp
         return None
+
