@@ -1,3 +1,6 @@
+import uuid
+from collections.abc import Sequence
+
 from core.shared.models.http import Paginator
 from core.shared.database.session import (
     AsyncSession,
@@ -15,6 +18,11 @@ async def get_or_404(repo: TasksUnitRepository, pk: int):
         raise ServiceNotFoundException(f"任务执行单元: {pk} 不存在")
 
     return db_obj
+
+
+async def get(unit_id: int, session: AsyncSession) -> TasksUnit:
+    repo = TasksUnitRepository(session=session)
+    return await get_or_404(repo=repo, pk=unit_id)
 
 
 async def create(
@@ -39,3 +47,24 @@ async def upget_paginator(
 ) -> Paginator:
     repo = TasksUnitRepository(session=session)
     return await repo.upget_paginator(task_id=task_id, paginator=paginator)
+
+
+async def get_round_units_id(
+    round_id: uuid.UUID, session: AsyncSession
+) -> Sequence[int]:
+    repo = TasksUnitRepository(session=session)
+    return await repo.get_round_units_id(round_id=round_id)
+
+
+async def get_round_units(
+    round_id: uuid.UUID, session: AsyncSession
+) -> Sequence[TasksUnit]:
+    repo = TasksUnitRepository(session=session)
+    return await repo.get_round_units(round_id=round_id)
+
+async def clear_round_units(
+    round_id: uuid.UUID, session: AsyncSession
+) -> None:
+
+    repo = TasksUnitRepository(session=session)
+    return await repo.clear_round_units(round_id=round_id)

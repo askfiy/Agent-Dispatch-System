@@ -13,6 +13,7 @@ from core.shared.globals import g
 from core.shared.exceptions import ServiceException
 from core.shared.dependencies import global_headers
 from core.shared.middleware import GlobalContextMiddleware, GlobalMonitorMiddleware
+from core.features.dispatch.service import Dispatch
 
 name = "Agent-Dispatch-System"
 logger = logging.getLogger(name)
@@ -22,7 +23,11 @@ logger = logging.getLogger(name)
 async def lifespan(app: fastapi.FastAPI):
     setup_logging()
 
+    await Dispatch.start()
+
     yield
+
+    await Dispatch.shutdown()
 
 
 app = fastapi.FastAPI(

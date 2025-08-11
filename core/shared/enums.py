@@ -37,3 +37,9 @@ class MessageRole(StrEnum):
     USER = "user"
     SYSTEM = "system"
     ASSISTANT = "assistant"
+
+class AgentTaskState(StrEnum):
+    ACTIVATING = "activating"
+    WAITING = "waiting"
+    FINISHED = "finished"
+    FAILED = "failed"

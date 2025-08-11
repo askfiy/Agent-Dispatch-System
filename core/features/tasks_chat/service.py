@@ -3,6 +3,7 @@ from core.shared.database.session import (
     AsyncSession,
     AsyncTxSession,
 )
+from core.shared.enums import MessageRole
 from core.shared.exceptions import ServiceNotFoundException
 from .scheme import TasksChat
 from .models import TaskChatCreateModel
@@ -30,3 +31,10 @@ async def upget_paginator(
 ) -> Paginator:
     repo = TasksChatRepository(session=session)
     return await repo.upget_paginator(task_id=task_id, paginator=paginator)
+
+
+async def get_last_message(
+    task_id: int, session: AsyncSession, role: MessageRole
+) -> TasksChat | None:
+    repo = TasksChatRepository(session=session)
+    return await repo.get_last_messages(task_id=task_id, role=role)
