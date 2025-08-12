@@ -54,3 +54,13 @@ class TasksUnitRepository(BaseCRUDRepository[TasksUnit]):
             )
             .values(state=TaskUnitState.CANCELLED)
         )
+
+    async def get_by_task(self, task_id: int) -> Sequence[TasksUnit]:
+        stmt = sa.select(self.model).where(
+            self.model.task_id == task_id,
+            self.model.state == TaskUnitState.COMPLETE,
+            sa.not_(self.model.is_deleted),
+        )
+
+        result = await self.session.execute(stmt)
+        return result.scalars().unique().all()

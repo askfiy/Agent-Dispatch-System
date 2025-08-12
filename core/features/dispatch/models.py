@@ -43,11 +43,17 @@ class TaskDispatchGeneratorPlanningModel(LLMOutputModel):
         examples=[prompt.get_process_example()],
     )
 
-class TaskDispatchUpdatePlanningModel(LLMOutputModel):
+
+class TaskDispatchUpdatePlanningOutput(LLMOutputModel):
     process: str = Field(
         description="更新后的任务执行计划.",
         examples=[prompt.get_process_example()],
     )
+
+class TaskDispatchUpdatePlanningInput(BaseModel):
+    process: str
+    notify_user: str
+    user_message: str
 
 
 class TaskDispatchExecuteUnitModel(BaseModel):
@@ -98,7 +104,21 @@ class TaskDispatchGeneratorNextStateModel(LLMOutputModel):
     )
     notify_user: str | None = Field(
         description="需要通知用户的信息, 仅在新任务状态为 'WAITING' 时填充. 此字段必须包含明确内容, 需要用户确认的信息必须完整的写入.",
-        examples=["已生成会议通知名单, 请确认是否有遗漏, 会议通知名单如下:\n1.张三\n2.李四 .."],
+        examples=[
+            "已生成会议通知名单, 请确认是否有遗漏, 会议通知名单如下:\n1.张三\n2.李四 .."
+        ],
     )
+
+
+class TaskDispatchGeneratorResultOutput(LLMOutputModel):
+    result: str = Field(
+        description="Result 最终的结果.", examples=[prompt.get_result_example()]
+    )
+
+
+class TaskDispatchGeneratorResultInput(BaseModel):
+    prd: str
+    process: str
+    all_units: list[TaskUnitDispatchModel]
 
 

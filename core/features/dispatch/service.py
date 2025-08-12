@@ -6,26 +6,25 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, override
 
+from agents import ModelSettings
 
 from core.shared.globals import broker, Agent, RSession
 from core.shared.components.openai.agent import OutputSchemaType
 from core.shared.database.session import (
     get_async_session_direct,
     get_async_tx_session_direct,
-    AsyncTxSession,
 )
 from core.shared.enums import TaskState, MessageRole, TaskUnitState
 from ..tasks.scheme import Tasks
 from ..tasks_unit.scheme import TasksUnit
 from ..tasks_chat.scheme import TasksChat
 from ..tasks.models import TaskCreateModel, TaskUpdateModel
-from ..tasks_chat.models import TaskChatCreateModel
+from ..tasks_chat.models import TaskChatCreateModel, TaskChatInCrudModel
 from ..tasks_unit.models import TaskUnitCreateModel, TaskUnitUpdateModel
 from ..audits_log.models import AuditCreateModel, AuditCreateTaskLogModel
 from ..tasks_workspace.models import TaskWorkspaceCreateModel, TaskWorkspaceUpdateModel
 from ..tasks import service as tasks_service
 from ..tasks_unit import service as tasks_unit_service
-from ..tasks_history import service as tasks_history_service
 from ..tasks_chat import service as tasks_chat_service
 from ..tasks_workspace import service as tasks_workspace_service
 from ..audits_log import service as audits_log_service
@@ -33,12 +32,15 @@ from .models import (
     TaskDispatchCreateModel,
     TaskDispatchGeneratorInfoModel,
     TaskDispatchGeneratorPlanningModel,
-    TaskDispatchUpdatePlanningModel,
+    TaskDispatchUpdatePlanningOutput,
+    TaskDispatchUpdatePlanningInput,
     TaskDispatchExecuteUnitModel,
     TaskDispatchGeneratorExecuteUnitModel,
     TaskDispatchExecuteUnitOutputModel,
     TaskUnitDispatchModel,
     TaskDispatchGeneratorNextStateModel,
+    TaskDispatchGeneratorResultOutput,
+    TaskDispatchGeneratorResultInput,
 )
 from . import prompt
 
@@ -125,6 +127,9 @@ class TaskAgent(Agent):
         response = await super().run(
             input=input, session=session, output_type=output_type, **kwargs
         )
+        logger.info("*" * 100)
+        logger.info(response)
+        logger.info("*" * 100)
         return response
 
     async def create_task(self, create_model: TaskDispatchCreateModel) -> Tasks | str:
@@ -238,7 +243,10 @@ class TaskAgent(Agent):
         """
 
         async def _execute_unit(
-            unit_id: int, prev_units_content: list[dict[str, Any]], prd: str
+            unit_id: int,
+            prev_units_content: list[dict[str, Any]],
+            chats: list[dict[str, Any]],
+            prd: str,
         ):
             async with get_async_tx_session_direct() as session:
                 unit: TasksUnit = await tasks_unit_service.get(
@@ -259,6 +267,7 @@ class TaskAgent(Agent):
                                 output_cls=TaskDispatchExecuteUnitOutputModel,
                                 unit_content=prev_units_content,
                                 prd=prd,
+                                chats=chats,
                             ),
                         },
                         {
@@ -300,9 +309,16 @@ class TaskAgent(Agent):
             )
             prd = workspace.prd
 
+            chats = [
+                TaskChatInCrudModel.model_validate(chat).model_dump()
+                for chat in task.chats
+            ]
+
         await asyncio.gather(
             *[
-                asyncio.create_task(_execute_unit(unit_id, prev_units_content, prd))
+                asyncio.create_task(
+                    _execute_unit(unit_id, prev_units_content, chats, prd)
+                )
                 for unit_id in curr_units
             ]
         )
@@ -368,21 +384,24 @@ class TaskAgent(Agent):
             workspace = await tasks_workspace_service.get(
                 workspace_id=task.workspace_id, session=session
             )
-            prd = workspace.prd
 
             # 更新执行计划
-            response_model: TaskDispatchUpdatePlanningModel = await self.run(
-                output_type=TaskDispatchUpdatePlanningModel,
+            response_model: TaskDispatchUpdatePlanningOutput = await self.run(
+                output_type=TaskDispatchUpdatePlanningOutput,
                 input=[
                     {
                         "role": MessageRole.SYSTEM,
                         "content": prompt.task_waiting_handle_prompt(
-                            output_cls=TaskDispatchUpdatePlanningModel
+                            output_cls=TaskDispatchUpdatePlanningOutput
                         ),
                     },
                     {
                         "role": MessageRole.USER,
-                        "content": f"PRD: {prd}, notify_user: {notify_user}, user_message: {user_message}",
+                        "content": TaskDispatchUpdatePlanningInput(
+                            process=workspace.process,
+                            notify_user=notify_user.message,  # pyright: ignore[reportOptionalMemberAccess]
+                            user_message=user_message,
+                        ).to_json_markdown(),
                     },
                 ],
             )
@@ -393,8 +412,8 @@ class TaskAgent(Agent):
                 session=session,
             )
 
-            # 加入调度 ..
-            await call_soon_task(task_id=task_id)
+        # 加入调度 ..
+        await call_soon_task(task_id=task_id)
 
     async def running_task(self, task_id: int):
         """
@@ -404,14 +423,17 @@ class TaskAgent(Agent):
         # 获取当前的执行单元的 output, 并根据 output 来更新 process.
         async with get_async_tx_session_direct() as session:
             task = await tasks_service.get(task_id=task_id, session=session)
+
             workspace = await tasks_workspace_service.get(
                 workspace_id=task.workspace_id, session=session
             )
+
             process = workspace.process
 
             curr_units = await tasks_unit_service.get_round_units(
                 round_id=task.curr_round_id, session=session
             )
+
             curr_units_content = [
                 TaskUnitDispatchModel.model_validate(unit).model_dump()
                 for unit in curr_units
@@ -426,6 +448,10 @@ class TaskAgent(Agent):
                         "content": prompt.task_run_next_prompt(
                             output_cls=TaskDispatchGeneratorNextStateModel,
                             unit_content=curr_units_content,
+                            chats=[
+                                TaskChatInCrudModel.model_validate(chat).model_dump()
+                                for chat in task.chats
+                            ],
                         ),
                     },
                     {"role": MessageRole.USER, "content": process},
@@ -437,25 +463,6 @@ class TaskAgent(Agent):
                 update_model=TaskWorkspaceUpdateModel(process=response_model.process),
                 session=session,
             )
-
-            if response_model.state == TaskState.WAITING:
-                # Waiting 需要用户补充信息
-                await tasks_chat_service.create(
-                    create_model=TaskChatCreateModel(
-                        role=MessageRole.ASSISTANT,
-                        task_id=task.id,
-                        message=typing.cast("str", response_model.notify_user),
-                    ),
-                    session=session,
-                )
-                # 清理其他同批次的执行单元
-            elif response_model.state == TaskState.ACTIVATING:
-                # 生成执行单元
-                await self.generator_task_unit(task_id=task_id)
-                # 运行执行单元
-                await self.execute_task_unit(task_id=task_id)
-            else:
-                return
 
             if response_model.state != task.state:
                 # 清理当前的 round, 因为我们要派发新一轮的了
@@ -469,6 +476,56 @@ class TaskAgent(Agent):
                     update_model=TaskUpdateModel(
                         state=TaskState(response_model.state.value)
                     ),
+                    session=session,
+                )
+
+        if response_model.state == TaskState.ACTIVATING:
+            # 生成执行单元
+            await self.generator_task_unit(task_id=task_id)
+            # 运行执行单元
+            await self.execute_task_unit(task_id=task_id)
+        elif response_model.state == TaskState.WAITING:
+            async with get_async_tx_session_direct() as session:
+                # waiting 需要用户补充信息
+                await tasks_chat_service.create(
+                    create_model=TaskChatCreateModel(
+                        role=MessageRole.ASSISTANT,
+                        task_id=task.id,
+                        message=typing.cast("str", response_model.notify_user),
+                    ),
+                    session=session,
+                )
+        else:
+            async with get_async_tx_session_direct() as session:
+                all_units = await tasks_unit_service.get_by_task(
+                    task_id=task_id, session=session
+                )
+                all_units = [
+                    TaskUnitDispatchModel.model_validate(unit) for unit in all_units
+                ]
+                result_model: TaskDispatchGeneratorResultOutput = await self.run(
+                    output_type=TaskDispatchGeneratorResultOutput,
+                    input=[
+                        {
+                            "role": MessageRole.SYSTEM,
+                            "content": prompt.task_run_result_prompt(
+                                TaskDispatchGeneratorResultOutput
+                            ),
+                        },
+                        {
+                            "role": MessageRole.USER,
+                            "content": TaskDispatchGeneratorResultInput(
+                                prd=workspace.prd,
+                                process=workspace.process,
+                                all_units=all_units,
+                            ).to_json_markdown(),
+                        },
+                    ],
+                )
+
+                await tasks_workspace_service.update(
+                    workspace_id=task.workspace_id,
+                    update_model=TaskWorkspaceUpdateModel(result=result_model.result),
                     session=session,
                 )
 
@@ -538,7 +595,11 @@ async def create_task(create_model: TaskDispatchCreateModel) -> Tasks | str:
     """
     创建任务
     """
-    agent = TaskAgent(name="Task-Analyst-Agent", instructions="任务分析 Agent.")
+    agent = TaskAgent(
+        name="Task-Analyst-Agent",
+        instructions="任务分析 Agent. 您的所有输出语言都必须已用户输入语言为准.",
+        model="gpt-4.1",
+    )
     return await agent.create_task(create_model=create_model)
 
 
@@ -546,7 +607,11 @@ async def execute_task(task_id: int):
     """
     开始执行任务
     """
-    agent = TaskAgent(name="Task-Dispatch-Agent", instructions="任务调度 Agent.")
+    agent = TaskAgent(
+        name="Task-Dispatch-Agent",
+        instructions="任务调度 Agent. 您的所有输出语言都必须已用户输入语言为准.",
+        model="gpt-4.1",
+    )
     return await agent.execute_task(task_id=task_id)
 
 
@@ -554,7 +619,11 @@ async def running_task(task_id: int):
     """
     继续运行任务
     """
-    agent = TaskAgent(name="Task-Dispatch-Agent", instructions="任务调度 Agent.")
+    agent = TaskAgent(
+        name="Task-Dispatch-Agent",
+        instructions="任务调度 Agent. 您的所有输出语言都必须已用户输入语言为准.",
+        model="gpt-4.1",
+    )
     return await agent.running_task(task_id=task_id)
 
 
@@ -562,5 +631,9 @@ async def add_user_message(task_id: int, user_message: str) -> None:
     """
     用户补充任务信息
     """
-    agent = TaskAgent(name="Task-Dispatch-Agent", instructions="任务调度 Agent.")
+    agent = TaskAgent(
+        name="Task-Dispatch-Agent",
+        instructions="任务调度 Agent. 您的所有输出语言都必须已用户输入语言为准.",
+        model="gpt-4.1",
+    )
     asyncio.create_task(agent.waiting_task(task_id=task_id, user_message=user_message))

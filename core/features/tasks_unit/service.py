@@ -24,6 +24,10 @@ async def get(unit_id: int, session: AsyncSession) -> TasksUnit:
     repo = TasksUnitRepository(session=session)
     return await get_or_404(repo=repo, pk=unit_id)
 
+async def get_by_task(task_id: int, session: AsyncSession) -> Sequence[TasksUnit]:
+    repo = TasksUnitRepository(session=session)
+    return await repo.get_by_task(task_id=task_id)
+
 
 async def create(
     create_model: TaskUnitCreateModel, session: AsyncTxSession
