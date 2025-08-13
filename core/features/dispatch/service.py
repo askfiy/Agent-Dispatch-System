@@ -18,11 +18,13 @@ from ..tasks_unit.scheme import TasksUnit
 from ..tasks.models import TaskCreateModel, TaskUpdateModel
 from ..tasks_chat.models import TaskChatCreateModel, TaskChatInCrudModel
 from ..tasks_unit.models import TaskUnitCreateModel, TaskUnitUpdateModel
+from ..tasks_history.models import TaskHistoryCreateModel
 from ..audits_log.models import AuditLLMlogModel
 from ..tasks_workspace.models import TaskWorkspaceCreateModel, TaskWorkspaceUpdateModel
 from ..tasks import service as tasks_service
 from ..tasks_unit import service as tasks_unit_service
 from ..tasks_chat import service as tasks_chat_service
+from ..tasks_history import service as tasks_history_service
 from ..tasks_workspace import service as tasks_workspace_service
 from ..audits_log import service as audits_log_service
 from .models import (
@@ -105,7 +107,6 @@ async def get_dispatch_tasks_id() -> Sequence[int]:
     """
     async with get_async_tx_session_direct() as session:
         return await tasks_service.get_dispatch_tasks_id(session=session)
-
 
 
 # ---- Task Agent ----
@@ -500,6 +501,16 @@ class TaskAgent(Agent):
                 ],
             )
             response_model: TaskDispatchGeneratorNextStateOutput
+
+            await tasks_history_service.create(
+                create_model=TaskHistoryCreateModel(
+                    task_id=task.id,
+                    state=TaskState(response_model.state),
+                    thinking=response_model.thinking,
+                    process=response_model.process,
+                ),
+                session=session,
+            )
 
             await audits_log_service.create(
                 create_model=AuditLLMlogModel(
