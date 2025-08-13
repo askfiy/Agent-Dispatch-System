@@ -1,4 +1,5 @@
 import uuid
+import datetime
 from pydantic import Field, model_validator
 
 from core.shared.enums import AgentTaskState
@@ -13,8 +14,7 @@ class TaskDispatchCreateModel(BaseModel):
     session_id: uuid.UUID
 
 
-# ---- 输出字段
-class TaskDispatchGeneratorInfoModel(LLMOutputModel):
+class TaskDispatchGeneratorInfoOutput(LLMOutputModel):
     is_splittable: bool = Field(description="是否需要创建任务", examples=[True])
 
     name: str = Field(
@@ -37,7 +37,7 @@ class TaskDispatchGeneratorInfoModel(LLMOutputModel):
     )
 
 
-class TaskDispatchGeneratorPlanningModel(LLMOutputModel):
+class TaskDispatchGeneratorPlanningOutput(LLMOutputModel):
     process: str = Field(
         description="任务执行计划. 一个 Markdown 文档, 必须清晰, 可执行.",
         examples=[prompt.get_process_example()],
@@ -50,13 +50,14 @@ class TaskDispatchUpdatePlanningOutput(LLMOutputModel):
         examples=[prompt.get_process_example()],
     )
 
+
 class TaskDispatchUpdatePlanningInput(BaseModel):
     process: str
     notify_user: str
     user_message: str
 
 
-class TaskDispatchExecuteUnitModel(BaseModel):
+class TaskDispatchExecuteUnitInput(BaseModel):
     name: str = Field(description="执行单元的名称", examples=["准备会议演示文稿"])
     objective: str = Field(
         description="执行单元的目标",
@@ -66,7 +67,7 @@ class TaskDispatchExecuteUnitModel(BaseModel):
     )
 
 
-class TaskUnitDispatchModel(BaseModel):
+class TaskUnitDispatchInput(BaseModel):
     name: str = Field(description="执行单元的名称", examples=["准备会议演示文稿"])
     objective: str = Field(
         description="执行单元的目标",
@@ -79,22 +80,23 @@ class TaskUnitDispatchModel(BaseModel):
         description="必须是面向用户的、清晰的执行结果报告。",
         examples=[prompt.get_unit_output_example()],
     )
+    created_at: datetime.datetime = Field(description="执行单元的内容产出时间.")
 
 
-class TaskDispatchGeneratorExecuteUnitModel(LLMOutputModel):
-    unit_list: list[TaskDispatchExecuteUnitModel] = Field(
+class TaskDispatchGeneratorExecuteUnitOutput(LLMOutputModel):
+    unit_list: list[TaskDispatchExecuteUnitInput] = Field(
         description="包含执行单元的列表"
     )
 
 
-class TaskDispatchExecuteUnitOutputModel(LLMOutputModel):
+class TaskDispatchExecuteUnitOutput(LLMOutputModel):
     output: str = Field(
         description="执行单元的执行结果, 面向用户的、清晰的执行结果报告。",
         examples=[prompt.get_unit_output_example()],
     )
 
 
-class TaskDispatchGeneratorNextStateModel(LLMOutputModel):
+class TaskDispatchGeneratorNextStateOutput(LLMOutputModel):
     process: str = Field(
         description="更新后的任务执行计划. 包含了每一个执行单元的 Output 最终结果.",
         examples=[prompt.get_next_process_example()],
@@ -108,6 +110,9 @@ class TaskDispatchGeneratorNextStateModel(LLMOutputModel):
             "已生成会议通知名单, 请确认是否有遗漏, 会议通知名单如下:\n1.张三\n2.李四 .."
         ],
     )
+    next_execute_time: LLMTimeField = Field(
+        description="当状态为 'scheduling' 时, 需填充该字段计算下一次的执行时间."
+    )
 
 
 class TaskDispatchGeneratorResultOutput(LLMOutputModel):
@@ -119,6 +124,4 @@ class TaskDispatchGeneratorResultOutput(LLMOutputModel):
 class TaskDispatchGeneratorResultInput(BaseModel):
     prd: str
     process: str
-    all_units: list[TaskUnitDispatchModel]
-
-
+    all_units: list[TaskUnitDispatchInput]

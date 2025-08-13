@@ -222,7 +222,7 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
         await self.session.execute(
             sa.update(self.model)
             .where(self.model.id.in_(tasks_id))
-            .values(state=TaskState.QUEUING)
+            .values(state=TaskState.QUEUING, lasted_execute_time=sa.func.now())
         )
 
         return tasks_id

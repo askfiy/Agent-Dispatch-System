@@ -11,7 +11,7 @@ class TaskState(StrEnum):
     # 任务等待用户输入
     WAITING = "waiting"
     # 任务等待调度
-    SCHEDULING = "scheduled"
+    SCHEDULING = "scheduling"
     # 任务已经完成
     FINISHED = "finished"
     # 任务已经失败
@@ -43,3 +43,4 @@ class AgentTaskState(StrEnum):
     WAITING = "waiting"
     FINISHED = "finished"
     FAILED = "failed"
+    SCHEDULING = "scheduling"

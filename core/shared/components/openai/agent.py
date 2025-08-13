@@ -13,11 +13,17 @@ from agents.items import TResponseInputItem
 from agents.result import RunResult, RunResultStreaming
 from agents.util._types import MaybeAwaitable
 
-from core.shared.base.models import LLMOutputModel
+from core.shared.base.models import LLMOutputModel, BaseModel
 
 from ..redis.session import RSession
 
 OutputSchemaType = TypeVar("OutputSchemaType", LLMOutputModel, AgentOutputSchemaBase)
+
+
+class Tokens(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
 
 
 class Agent:
@@ -71,7 +77,7 @@ class Agent:
         session: RSession | None = None,
         output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
-    ) -> RunResult | OutputSchemaType:
+    ) -> tuple[RunResult | OutputSchemaType, Tokens]:
         agent = self.agent.clone(output_type=output_type, **kwargs)
         run_result = await Runner.run(
             agent,
@@ -79,7 +85,14 @@ class Agent:
             session=session or self.session,
         )
 
-        if output_type is not None:
-            return run_result.final_output_as(output_type)
+        tokens = Tokens(
+            input_tokens=run_result.context_wrapper.usage.input_tokens or 0,
+            output_tokens=run_result.context_wrapper.usage.output_tokens or 0,
+            cached_tokens=run_result.context_wrapper.usage.input_tokens_details.cached_tokens
+            or 0,
+        )
 
-        return run_result
+        if output_type is not None:
+            return run_result.final_output_as(output_type), tokens
+
+        return run_result, tokens

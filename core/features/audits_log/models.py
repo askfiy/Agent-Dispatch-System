@@ -1,11 +1,11 @@
 import uuid
 import json
 import datetime
-from typing import Any
+import logging
 
 from core.shared.base.models import BaseModel
 
-from ..tasks.scheme import Tasks
+logger = logging.getLogger("Audits")
 
 
 class AuditInCrudModel(BaseModel):
@@ -19,17 +19,21 @@ class AuditCreateModel(BaseModel):
     message: str
 
 
-class AuditCreateTaskLogModel(BaseModel):
+class AuditLLMlogModel(BaseModel):
     session_id: uuid.UUID
     thinking: str
-    task: Tasks | None = None
+    message: str
+    tokens: dict[str, int]
 
     def to_audit_log(self) -> AuditCreateModel:
-        task_dict = self.task.to_dict() if self.task else {}
+        audit_log = {
+            "message": self.message,
+            "thinking": self.thinking,
+            "tokens": self.tokens,
+        }
 
+        logger.info(audit_log)
         return AuditCreateModel(
             session_id=self.session_id,
-            message=json.dumps(
-                {"thinking": self.thinking, "task": task_dict}, ensure_ascii=False
-            ),
+            message=json.dumps(audit_log, ensure_ascii=False),
         )

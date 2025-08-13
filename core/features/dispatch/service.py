@@ -6,8 +6,6 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, override
 
-from agents import ModelSettings
-
 from core.shared.globals import broker, Agent, RSession
 from core.shared.components.openai.agent import OutputSchemaType
 from core.shared.database.session import (
@@ -17,11 +15,10 @@ from core.shared.database.session import (
 from core.shared.enums import TaskState, MessageRole, TaskUnitState
 from ..tasks.scheme import Tasks
 from ..tasks_unit.scheme import TasksUnit
-from ..tasks_chat.scheme import TasksChat
 from ..tasks.models import TaskCreateModel, TaskUpdateModel
 from ..tasks_chat.models import TaskChatCreateModel, TaskChatInCrudModel
 from ..tasks_unit.models import TaskUnitCreateModel, TaskUnitUpdateModel
-from ..audits_log.models import AuditCreateModel, AuditCreateTaskLogModel
+from ..audits_log.models import AuditLLMlogModel
 from ..tasks_workspace.models import TaskWorkspaceCreateModel, TaskWorkspaceUpdateModel
 from ..tasks import service as tasks_service
 from ..tasks_unit import service as tasks_unit_service
@@ -30,15 +27,15 @@ from ..tasks_workspace import service as tasks_workspace_service
 from ..audits_log import service as audits_log_service
 from .models import (
     TaskDispatchCreateModel,
-    TaskDispatchGeneratorInfoModel,
-    TaskDispatchGeneratorPlanningModel,
+    TaskDispatchGeneratorInfoOutput,
+    TaskDispatchGeneratorPlanningOutput,
     TaskDispatchUpdatePlanningOutput,
     TaskDispatchUpdatePlanningInput,
-    TaskDispatchExecuteUnitModel,
-    TaskDispatchGeneratorExecuteUnitModel,
-    TaskDispatchExecuteUnitOutputModel,
-    TaskUnitDispatchModel,
-    TaskDispatchGeneratorNextStateModel,
+    TaskDispatchExecuteUnitInput,
+    TaskDispatchGeneratorExecuteUnitOutput,
+    TaskDispatchExecuteUnitOutput,
+    TaskUnitDispatchInput,
+    TaskDispatchGeneratorNextStateOutput,
     TaskDispatchGeneratorResultOutput,
     TaskDispatchGeneratorResultInput,
 )
@@ -110,7 +107,6 @@ async def get_dispatch_tasks_id() -> Sequence[int]:
         return await tasks_service.get_dispatch_tasks_id(session=session)
 
 
-# -----
 
 # ---- Task Agent ----
 
@@ -124,26 +120,24 @@ class TaskAgent(Agent):
         output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
     ):
-        response = await super().run(
+        response, tokens = await super().run(
             input=input, session=session, output_type=output_type, **kwargs
         )
-        logger.info("*" * 100)
-        logger.info(response)
-        logger.info("*" * 100)
-        return response
+
+        return response, tokens
 
     async def create_task(self, create_model: TaskDispatchCreateModel) -> Tasks | str:
         """
         创建任务
         """
 
-        response_model: TaskDispatchGeneratorInfoModel = await self.run(
-            output_type=TaskDispatchGeneratorInfoModel,
+        response_model, tokens = await self.run(
+            output_type=TaskDispatchGeneratorInfoOutput,
             input=[
                 {
                     "role": MessageRole.SYSTEM,
                     "content": prompt.task_analyst_prompt(
-                        TaskDispatchGeneratorInfoModel
+                        TaskDispatchGeneratorInfoOutput
                     ),
                 },
                 {
@@ -152,14 +146,17 @@ class TaskAgent(Agent):
                 },
             ],
         )
+        response_model: TaskDispatchGeneratorInfoOutput
 
         async with get_async_tx_session_direct() as session:
             if not response_model.is_splittable:
                 # 记录审计日志
                 await audits_log_service.create(
-                    create_model=AuditCreateTaskLogModel(
+                    create_model=AuditLLMlogModel(
                         session_id=create_model.session_id,
                         thinking=response_model.thinking,
+                        message="不创建任务",
+                        tokens=tokens.model_dump(),
                     ).to_audit_log(),
                     session=session,
                 )
@@ -192,10 +189,11 @@ class TaskAgent(Agent):
 
             # 3. 记录审计日志
             await audits_log_service.create(
-                create_model=AuditCreateTaskLogModel(
+                create_model=AuditLLMlogModel(
                     session_id=create_model.session_id,
                     thinking=response_model.thinking,
-                    task=task,
+                    message=f"任务创建成功: {task.id}",
+                    tokens=tokens.model_dump(),
                 ).to_audit_log(),
                 session=session,
             )
@@ -216,17 +214,28 @@ class TaskAgent(Agent):
                 prd = workspace.prd
 
                 # 拆解执行计划
-                response_model: TaskDispatchGeneratorPlanningModel = await self.run(
-                    output_type=TaskDispatchGeneratorPlanningModel,
+                response_model, tokens = await self.run(
+                    output_type=TaskDispatchGeneratorPlanningOutput,
                     input=[
                         {
                             "role": MessageRole.SYSTEM,
                             "content": prompt.task_planning_prompt(
-                                output_cls=TaskDispatchGeneratorPlanningModel
+                                output_cls=TaskDispatchGeneratorPlanningOutput
                             ),
                         },
                         {"role": MessageRole.USER, "content": prd},
                     ],
+                )
+                response_model: TaskDispatchGeneratorPlanningOutput
+
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking=response_model.thinking,
+                        message="执行计划生成成功",
+                        tokens=tokens.model_dump(),
+                    ).to_audit_log(),
+                    session=session,
                 )
 
                 await tasks_workspace_service.update(
@@ -259,12 +268,12 @@ class TaskAgent(Agent):
                 )
 
                 # 运行执行单元
-                response_model: TaskDispatchExecuteUnitOutputModel = await self.run(
+                response_model, tokens = await self.run(
                     input=[
                         {
                             "role": MessageRole.SYSTEM,
                             "content": prompt.task_run_unit_prompt(
-                                output_cls=TaskDispatchExecuteUnitOutputModel,
+                                output_cls=TaskDispatchExecuteUnitOutput,
                                 unit_content=prev_units_content,
                                 prd=prd,
                                 chats=chats,
@@ -275,14 +284,25 @@ class TaskAgent(Agent):
                             "content": unit.objective,
                         },
                     ],
-                    output_type=TaskDispatchExecuteUnitOutputModel,
+                    output_type=TaskDispatchExecuteUnitOutput,
                 )
+                response_model: TaskDispatchExecuteUnitOutput
 
                 unit = await tasks_unit_service.update(
                     unit_id=unit_id,
                     update_model=TaskUnitUpdateModel(
                         state=TaskUnitState.COMPLETE, output=response_model.output
                     ),
+                    session=session,
+                )
+
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking=response_model.thinking,
+                        message=f"执行单元 {unit.name} 运行完成: {unit.output}",
+                        tokens=tokens.model_dump(),
+                    ).to_audit_log(),
                     session=session,
                 )
 
@@ -300,7 +320,7 @@ class TaskAgent(Agent):
 
             # 将上次的执行单元做完的 Unit 汇总为 list[JSON].
             prev_units_content = [
-                TaskUnitDispatchModel.model_validate(unit).model_dump()
+                TaskUnitDispatchInput.model_validate(unit).model_dump()
                 for unit in prev_units
             ]
 
@@ -336,18 +356,19 @@ class TaskAgent(Agent):
             process = workspace.process
 
             # 拆解执行单元
-            response_model: TaskDispatchGeneratorExecuteUnitModel = await self.run(
-                output_type=TaskDispatchGeneratorExecuteUnitModel,
+            response_model, tokens = await self.run(
+                output_type=TaskDispatchGeneratorExecuteUnitOutput,
                 input=[
                     {
                         "role": MessageRole.SYSTEM,
                         "content": prompt.task_get_unit_prompt(
-                            output_cls=TaskDispatchGeneratorExecuteUnitModel
+                            output_cls=TaskDispatchGeneratorExecuteUnitOutput
                         ),
                     },
                     {"role": MessageRole.USER, "content": process},
                 ],
             )
+            response_model: TaskDispatchGeneratorExecuteUnitOutput
 
             # 派发轮次
             task = await tasks_service.update(
@@ -359,9 +380,19 @@ class TaskAgent(Agent):
                 session=session,
             )
 
+            await audits_log_service.create(
+                create_model=AuditLLMlogModel(
+                    session_id=task.session_id,
+                    thinking=response_model.thinking,
+                    message=f"任务执行单元拆解成功, 派发批次 {task.curr_round_id}",
+                    tokens=tokens.model_dump(),
+                ).to_audit_log(),
+                session=session,
+            )
+
             # 创建执行单元
             for unit in response_model.unit_list:
-                unit: TaskDispatchExecuteUnitModel
+                unit: TaskDispatchExecuteUnitInput
 
                 await tasks_unit_service.create(
                     create_model=TaskUnitCreateModel(
@@ -386,7 +417,7 @@ class TaskAgent(Agent):
             )
 
             # 更新执行计划
-            response_model: TaskDispatchUpdatePlanningOutput = await self.run(
+            response_model, tokens = await self.run(
                 output_type=TaskDispatchUpdatePlanningOutput,
                 input=[
                     {
@@ -404,6 +435,17 @@ class TaskAgent(Agent):
                         ).to_json_markdown(),
                     },
                 ],
+            )
+            response_model: TaskDispatchUpdatePlanningOutput
+
+            await audits_log_service.create(
+                create_model=AuditLLMlogModel(
+                    session_id=task.session_id,
+                    thinking=response_model.thinking,
+                    message=f"用户反馈信息后成功更新执行计划. 反馈信息: {user_message}",
+                    tokens=tokens.model_dump(),
+                ).to_audit_log(),
+                session=session,
             )
 
             await tasks_workspace_service.update(
@@ -435,18 +477,18 @@ class TaskAgent(Agent):
             )
 
             curr_units_content = [
-                TaskUnitDispatchModel.model_validate(unit).model_dump()
+                TaskUnitDispatchInput.model_validate(unit).model_dump()
                 for unit in curr_units
             ]
 
             # 根据 units 的反馈, 来更新当前的 process 以及任务状态
-            response_model: TaskDispatchGeneratorNextStateModel = await self.run(
-                output_type=TaskDispatchGeneratorNextStateModel,
+            response_model, tokens = await self.run(
+                output_type=TaskDispatchGeneratorNextStateOutput,
                 input=[
                     {
                         "role": MessageRole.SYSTEM,
                         "content": prompt.task_run_next_prompt(
-                            output_cls=TaskDispatchGeneratorNextStateModel,
+                            output_cls=TaskDispatchGeneratorNextStateOutput,
                             unit_content=curr_units_content,
                             chats=[
                                 TaskChatInCrudModel.model_validate(chat).model_dump()
@@ -456,6 +498,17 @@ class TaskAgent(Agent):
                     },
                     {"role": MessageRole.USER, "content": process},
                 ],
+            )
+            response_model: TaskDispatchGeneratorNextStateOutput
+
+            await audits_log_service.create(
+                create_model=AuditLLMlogModel(
+                    session_id=task.session_id,
+                    thinking=response_model.thinking,
+                    message=f"任务的状态和 Process 更新推进, 新状态为: {response_model.state}",
+                    tokens=tokens.model_dump(),
+                ).to_audit_log(),
+                session=session,
             )
 
             await tasks_workspace_service.update(
@@ -484,6 +537,16 @@ class TaskAgent(Agent):
             await self.generator_task_unit(task_id=task_id)
             # 运行执行单元
             await self.execute_task_unit(task_id=task_id)
+        if response_model.state == TaskState.SCHEDULING:
+            async with get_async_tx_session_direct() as session:
+                # 计算下次执行时间
+                await tasks_service.update(
+                    task_id=task.id,
+                    update_model=TaskUpdateModel(
+                        expect_execute_time=response_model.next_execute_time.get_utc_datetime()
+                    ),
+                    session=session,
+                )
         elif response_model.state == TaskState.WAITING:
             async with get_async_tx_session_direct() as session:
                 # waiting 需要用户补充信息
@@ -501,9 +564,9 @@ class TaskAgent(Agent):
                     task_id=task_id, session=session
                 )
                 all_units = [
-                    TaskUnitDispatchModel.model_validate(unit) for unit in all_units
+                    TaskUnitDispatchInput.model_validate(unit) for unit in all_units
                 ]
-                result_model: TaskDispatchGeneratorResultOutput = await self.run(
+                result_model, tokens = await self.run(
                     output_type=TaskDispatchGeneratorResultOutput,
                     input=[
                         {
@@ -522,6 +585,7 @@ class TaskAgent(Agent):
                         },
                     ],
                 )
+                result_model: TaskDispatchGeneratorResultOutput
 
                 await tasks_workspace_service.update(
                     workspace_id=task.workspace_id,
@@ -573,14 +637,6 @@ async def call_soon_task(task_id: int):
         expect_execute_time = task.expect_execute_time.replace(tzinfo=timezone.utc)
 
         if expect_execute_time <= datetime.now(timezone.utc):
-            # 记录审计日志
-            await audits_log_service.create(
-                session=session,
-                create_model=AuditCreateModel(
-                    session_id=task.session_id,
-                    message=f"Task: {task.id} call soon task. add to dispatch topic.",
-                ),
-            )
             await tasks_service.update(
                 task_id=task_id,
                 update_model=TaskUpdateModel(state=TaskState.QUEUING),
