@@ -29,6 +29,7 @@ from ..tasks_workspace import service as tasks_workspace_service
 from ..audits_log import service as audits_log_service
 from .models import (
     TaskDispatchCreateModel,
+    TaskDispatchRefactorModel,
     TaskDispatchGeneratorInfoOutput,
     TaskDispatchGeneratorPlanningOutput,
     TaskDispatchUpdatePlanningOutput,
@@ -40,6 +41,7 @@ from .models import (
     TaskDispatchGeneratorNextStateOutput,
     TaskDispatchGeneratorResultOutput,
     TaskDispatchGeneratorResultInput,
+    TaskDispatchRefactorInfoOutput,
 )
 from . import prompt
 
@@ -449,6 +451,12 @@ class TaskAgent(Agent):
                 session=session,
             )
 
+            await tasks_service.update(
+                task_id=task.id,
+                update_model=TaskUpdateModel(state=TaskState.SCHEDULING),
+                session=session,
+            )
+
             await tasks_workspace_service.update(
                 workspace_id=task.workspace_id,
                 update_model=TaskWorkspaceUpdateModel(process=response_model.process),
@@ -466,6 +474,10 @@ class TaskAgent(Agent):
         # 获取当前的执行单元的 output, 并根据 output 来更新 process.
         async with get_async_tx_session_direct() as session:
             task = await tasks_service.get(task_id=task_id, session=session)
+
+            # 任务正在被重构. 这里不要再继续了.
+            if task.state == TaskState.UPDATING:
+                return
 
             workspace = await tasks_workspace_service.get(
                 workspace_id=task.workspace_id, session=session
@@ -637,6 +649,83 @@ class TaskAgent(Agent):
         # 运行执行单元
         await self.execute_task_unit(task_id=task_id)
 
+    async def refactor_task(self, update_model: TaskDispatchRefactorModel):
+        """
+        重构任务
+        """
+        task_id = update_model.task_id
+
+        async with get_async_tx_session_direct() as session:
+            await tasks_service.update(
+                task_id=task_id,
+                update_model=TaskUpdateModel(
+                    state=TaskState.UPDATING,
+                    curr_round_id=None,
+                    prev_round_id=None,
+                    lasted_execute_time=None,
+                ),
+                session=session,
+            )
+
+            # 生成新的 prd
+
+        response_model, tokens = await self.run(
+            output_type=TaskDispatchRefactorInfoOutput,
+            input=[
+                {
+                    "role": MessageRole.SYSTEM,
+                    "content": prompt.task_refactor_prompt(
+                        TaskDispatchGeneratorInfoOutput
+                    ),
+                },
+                {
+                    "role": MessageRole.USER,
+                    "content": update_model.update_user_prompt,
+                },
+            ],
+        )
+
+        response_model: TaskDispatchGeneratorInfoOutput
+
+        async with get_async_tx_session_direct() as session:
+            task = await tasks_service.refactor(task_id=task_id, session=session)
+
+            await audits_log_service.create(
+                create_model=AuditLLMlogModel(
+                    session_id=task.session_id,
+                    thinking=response_model.thinking,
+                    message=f"用户更新任务信息成功, 任务已被重构: {response_model.thinking}",
+                    tokens=tokens.model_dump(),
+                ).to_audit_log(),
+                session=session,
+            )
+
+            await tasks_service.update(
+                task_id=task_id,
+                update_model=TaskUpdateModel(
+                    name=response_model.name,
+                    state=TaskState.SCHEDULING,
+                    prev_round_id=None,
+                    curr_round_id=None,
+                    lasted_execute_time=None,
+                    keywords=response_model.keywords,
+                    expect_execute_time=response_model.expect_execute_time.get_utc_datetime(
+                        task.owner_timezone
+                    ),
+                ),
+                session=session,
+            )
+
+            await tasks_workspace_service.update(
+                workspace_id=task.workspace_id,
+                update_model=TaskWorkspaceUpdateModel(
+                    prd=response_model.prd, process=None, result=None
+                ),
+                session=session,
+            )
+
+        await call_soon_task(task_id=task_id)
+
 
 async def call_soon_task(task_id: int):
     """
@@ -656,6 +745,13 @@ async def call_soon_task(task_id: int):
 
     if expect_execute_time <= datetime.now(timezone.utc):
         await Dispatch.send_to_ready_topic(task_id=task.id)
+
+
+async def refactor_task(update_model: TaskDispatchRefactorModel) -> Tasks:
+    """
+    重构任务
+    """
+    pass
 
 
 async def create_task(create_model: TaskDispatchCreateModel) -> Tasks | str:

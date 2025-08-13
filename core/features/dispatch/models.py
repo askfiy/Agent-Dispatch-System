@@ -13,6 +13,10 @@ class TaskDispatchCreateModel(BaseModel):
     owner_timezone: str = Field(default="UTC", exclude=True)
     session_id: uuid.UUID
 
+class TaskDispatchRefactorModel(BaseModel):
+    task_id: int
+    update_user_prompt: str
+
 
 class TaskDispatchGeneratorInfoOutput(LLMOutputModel):
     is_splittable: bool = Field(description="是否需要创建任务", examples=[True])
@@ -35,6 +39,27 @@ class TaskDispatchGeneratorInfoOutput(LLMOutputModel):
         description="需求 PRD. 必须包含背景, 目标, 描述信息, 执行计划等等. 若不需要创建任务. 则不必创建 PRD.",
         examples=[prompt.get_prd_example()],
     )
+
+class TaskDispatchRefactorInfoOutput(LLMOutputModel):
+    name: str = Field(
+        description="任务名称",
+        examples=["定时参加会议"],
+    )
+
+    expect_execute_time: LLMTimeField = Field(
+        description="任务预期执行时间. 若是**立即执行**的任务, 则时间为当前时间. 若是 **延迟执行任务** 则推算出其最近一次的执行时间即可.",
+    )
+
+    keywords: list[str] = Field(
+        description="任务关键字, 必须是纯英文. ",
+        examples=["timed", "feature", "meeting", "ZhangSan"],
+    )
+
+    prd: str = Field(
+        description="需求 PRD. 必须包含背景, 目标, 描述信息, 执行计划等等. 若不需要创建任务. 则不必创建 PRD.",
+        examples=[prompt.get_prd_example()],
+    )
+
 
 
 class TaskDispatchGeneratorPlanningOutput(LLMOutputModel):

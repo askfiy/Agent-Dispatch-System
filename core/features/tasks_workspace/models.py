@@ -15,5 +15,6 @@ class TaskWorkspaceCreateModel(BaseModel):
 
 
 class TaskWorkspaceUpdateModel(BaseModel):
+    prd: str | None = None
     process: str | None = None
     result: str | None = None

@@ -37,6 +37,13 @@ async def create(create_model: TaskCreateModel, session: AsyncTxSession) -> Task
     return db_obj
 
 
+async def refactor(task_id: int, session: AsyncTxSession):
+    repo = TasksCrudRepository(session=session)
+    db_obj = await get_or_404(repo=repo, pk=task_id)
+    db_obj = await repo.refactor(db_obj)
+    return db_obj
+
+
 async def update(
     task_id: int, update_model: TaskUpdateModel, session: AsyncTxSession
 ) -> Tasks:

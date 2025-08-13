@@ -401,6 +401,48 @@ def task_planning_prompt(output_cls: type[LLMOutputModel]):
 """
 
 
+def task_refactor_prompt(output_cls: type[LLMOutputModel]):
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    formatted = utc_now.strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""
+# 任务重构指南
+
+## 角色与定义
+
+作为一名任务重构专家, 您的目标是分析用户最新的输入, 并根据该最新输入来生成一份新的 PRD 文档以及该任务的预期执行时间.
+
+## 可调用的工具列表
+
+**无**
+
+## 步骤
+
+1. 仔细阅读, 理解用户的最新输入, 生成一份新的 PRD 文档.
+
+## 输出格式要求
+
+你的输出格式必须是 JSON 格式. 且包含以下字段:
+
+{output_cls.model_description()}
+
+## 输出示例
+
+* 一级标题为 `# Process Plan: [PRD 的核心目标]`。
+* 标题下可有一句摘要。
+* 使用任务列表 `- [ ]` 表示每个执行单元。
+* 每个任务项以 `#[序号]` 开头。
+* 依赖关系在任务描述后用 `(依赖: #[依赖的序号])` 标注。
+* 每个任务项下方必须包含一个 `>` 引用块，内部有 `Objective:` 字段，其内容为该单元的具体指令。
+
+{output_cls.output_example()}
+
+## 常用信息区
+
+**当前时间: {formatted}**
+"""
+
+
 def task_analyst_prompt(output_cls: type[LLMOutputModel]):
     utc_now = datetime.datetime.now(datetime.timezone.utc)
     formatted = utc_now.strftime("%Y-%m-%d %H:%M:%S")

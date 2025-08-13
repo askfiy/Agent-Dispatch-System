@@ -138,6 +138,34 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
 
         return result.unique().scalar_one_or_none()
 
+    async def refactor(self, db_obj: Tasks) -> Tasks:
+        """只删除 Chat. Unit. History. 保留当前任务, 以及 workspace 信息."""
+        task = db_obj
+
+        soft_delete_coroutines = [
+            self.session.execute(
+                sa.update(table)
+                .where(
+                    # 注意：这里需要检查表是否有 task_id 属性，这些表都有
+                    table.task_id == task.id,
+                    sa.not_(table.is_deleted),
+                )
+                .values(is_deleted=True, deleted_at=sa.func.now())
+            )
+            for table in [
+                TasksChat,
+                TasksUnit,
+                TasksHistory,
+            ]
+        ]
+
+        await asyncio.gather(*soft_delete_coroutines)
+
+        # 因为有事务装饰器的存在， 故这里所有的操作均为原子操作.
+        await self.session.refresh(task)
+
+        return task
+
     @override
     async def delete(self, db_obj: Tasks) -> Tasks:
         task = db_obj
