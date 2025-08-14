@@ -11,7 +11,7 @@ from ..tasks_history.models import TaskHistoryInCrudModel
 
 
 class TaskInCrudModel(BaseModel):
-    session_id: uuid.UUID
+    session_id: str
 
     id: int
     name: str
@@ -35,7 +35,7 @@ class TaskInCrudModel(BaseModel):
 
 
 class TaskCreateModel(BaseModel):
-    session_id: uuid.UUID
+    session_id: str
     name: str
     workspace_id: int
     expect_execute_time: datetime.datetime

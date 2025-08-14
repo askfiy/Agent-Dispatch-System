@@ -26,7 +26,7 @@ async def create(create_model: AuditCreateModel, session: AsyncTxSession) -> Aud
 
 
 async def upget_paginator(
-    session_id: uuid.UUID, paginator: Paginator, session: AsyncSession
+    session_id: str, paginator: Paginator, session: AsyncSession
 ) -> Paginator:
     repo = AuditsLogRepository(session=session)
     return await repo.upget_paginator(session_id=session_id, paginator=paginator)

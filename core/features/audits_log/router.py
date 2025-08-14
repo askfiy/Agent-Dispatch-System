@@ -42,7 +42,7 @@ async def get_all(
 ) -> PaginationResponse:
     paginator = Paginator(request=request, serializer_cls=AuditInCrudModel)
     paginator = await service.upget_paginator(
-        session_id=uuid.UUID(session_id), paginator=paginator, session=session
+        session_id=session_id, paginator=paginator, session=session
     )
     return paginator.response
 

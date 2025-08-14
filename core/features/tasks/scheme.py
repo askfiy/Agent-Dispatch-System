@@ -47,7 +47,7 @@ class Tasks(BaseTableScheme):
         server_default=sa.text("0"),
     )
 
-    session_id: Mapped[uuid.UUID] = mapped_column(
+    session_id: Mapped[str] = mapped_column(
         sa.CHAR(36),
         nullable=False,
         index=True,

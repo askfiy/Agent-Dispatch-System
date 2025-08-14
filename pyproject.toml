@@ -5,12 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "a2a-sdk>=0.3.1",
     "alembic>=1.16.4",
     "asyncmy>=0.2.10",
     "colorlog>=6.9.0",
     "fastapi>=0.116.1",
     "greenlet>=3.2.4",
-    "openai-agents>=0.2.5",
+    "openai-agents[litellm]>=0.2.6",
+    "openai>=1.99.9",
     "pydantic-settings>=2.10.1",
     "pymysql>=1.1.1",
     "pytz>=2025.2",

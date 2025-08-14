@@ -9,18 +9,18 @@ logger = logging.getLogger("Audits")
 
 
 class AuditInCrudModel(BaseModel):
-    session_id: uuid.UUID
+    session_id: str
     message: str
     created_at: datetime.datetime
 
 
 class AuditCreateModel(BaseModel):
-    session_id: uuid.UUID
+    session_id: str
     message: str
 
 
 class AuditLLMlogModel(BaseModel):
-    session_id: uuid.UUID
+    session_id: str
     thinking: str
     message: str
     tokens: dict[str, int]

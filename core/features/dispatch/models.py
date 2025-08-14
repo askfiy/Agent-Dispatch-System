@@ -7,11 +7,17 @@ from core.shared.base.models import BaseModel, LLMOutputModel, LLMTimeField
 from . import prompt
 
 
+class TaskDispatchLLMModel(BaseModel):
+    model_name: str
+    api_key: str
+
+
 class TaskDispatchCreateModel(BaseModel):
     owner: str
     original_user_input: str
     owner_timezone: str = Field(default="UTC", exclude=True)
-    session_id: uuid.UUID
+    session_id: str
+
 
 class TaskDispatchRefactorModel(BaseModel):
     task_id: int
@@ -27,7 +33,7 @@ class TaskDispatchGeneratorInfoOutput(LLMOutputModel):
     )
 
     expect_execute_time: LLMTimeField = Field(
-        description="任务预期执行时间. 若是**立即执行**的任务, 则时间为当前时间. 若不需要创建任务. 则不必计算时间.",
+        description="任务预期执行时间. 若是**立即执行**的任务, 则时间为当前时间. 若不需要创建任务. 则不必计算时间. 要求: **严格输出 UTC 时间**.",
     )
 
     keywords: list[str] = Field(
@@ -40,6 +46,7 @@ class TaskDispatchGeneratorInfoOutput(LLMOutputModel):
         examples=[prompt.get_prd_example()],
     )
 
+
 class TaskDispatchRefactorInfoOutput(LLMOutputModel):
     name: str = Field(
         description="任务名称",
@@ -47,7 +54,7 @@ class TaskDispatchRefactorInfoOutput(LLMOutputModel):
     )
 
     expect_execute_time: LLMTimeField = Field(
-        description="任务预期执行时间. 若是**立即执行**的任务, 则时间为当前时间. 若是 **延迟执行任务** 则推算出其最近一次的执行时间即可.",
+        description="任务预期执行时间. 若是**立即执行**的任务, 则时间为当前时间. 若是 **延迟执行任务** 则推算出其最近一次的执行时间即可. 要求: **严格输出 UTC 时间**.",
     )
 
     keywords: list[str] = Field(
@@ -59,7 +66,6 @@ class TaskDispatchRefactorInfoOutput(LLMOutputModel):
         description="需求 PRD. 必须包含背景, 目标, 描述信息, 执行计划等等. 若不需要创建任务. 则不必创建 PRD.",
         examples=[prompt.get_prd_example()],
     )
-
 
 
 class TaskDispatchGeneratorPlanningOutput(LLMOutputModel):
@@ -136,7 +142,7 @@ class TaskDispatchGeneratorNextStateOutput(LLMOutputModel):
         ],
     )
     next_execute_time: LLMTimeField = Field(
-        description="当状态为 'scheduling' 时, 需填充该字段计算下一次的执行时间."
+        description="当状态为 'scheduling' 时, 需填充该字段计算下一次的执行时间. 要求: **严格输出 UTC 时间**."
     )
 
 

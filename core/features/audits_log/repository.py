@@ -9,7 +9,7 @@ from .scheme import AuditsLog
 class AuditsLogRepository(BaseCRUDRepository[AuditsLog]):
     async def upget_paginator(
         self,
-        session_id: uuid.UUID,
+        session_id: str,
         paginator: Paginator,
     ) -> Paginator:
         query_stmt = sa.select(self.model).where(

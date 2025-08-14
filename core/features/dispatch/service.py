@@ -6,6 +6,9 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, override
 
+from agents import Model
+
+from core.shared.components.openai.agent import Tokens
 from core.shared.globals import broker, Agent, RSession
 from core.shared.components.openai.agent import OutputSchemaType
 from core.shared.database.session import (
@@ -28,6 +31,7 @@ from ..tasks_history import service as tasks_history_service
 from ..tasks_workspace import service as tasks_workspace_service
 from ..audits_log import service as audits_log_service
 from .models import (
+    TaskDispatchLLMModel,
     TaskDispatchCreateModel,
     TaskDispatchRefactorModel,
     TaskDispatchGeneratorInfoOutput,
@@ -45,8 +49,24 @@ from .models import (
 )
 from . import prompt
 
+from multi_agent_centre.core.model_provider import ModelAdapter
+from multi_agent_centre.core._a2a.tools import send_a2a_message
+from multi_agent_centre.api.xyz_platform import XyzPlatformServer
+
+
+model_adapter = ModelAdapter()
 
 logger = logging.getLogger("Dispatch-Task")
+
+
+async def get_llm_model(session_id: str) -> Model:
+    model_info = await XyzPlatformServer.get_model_info_by_session_id(
+        session_id=session_id
+    )
+    model_data = TaskDispatchLLMModel.model_validate(model_info)
+    return model_adapter.get_model(
+        model_name=model_data.model_name, api_key=model_data.api_key
+    )
 
 
 # ---- 调度器核心方法
@@ -133,77 +153,79 @@ class TaskAgent(Agent):
         """
         创建任务
         """
+        try:
+            response_model, tokens = await self.run(
+                output_type=TaskDispatchGeneratorInfoOutput,
+                input=[
+                    {
+                        "role": MessageRole.SYSTEM,
+                        "content": prompt.task_analyst_prompt(
+                            TaskDispatchGeneratorInfoOutput
+                        ),
+                    },
+                    {
+                        "role": MessageRole.USER,
+                        "content": create_model.to_json_markdown(),
+                    },
+                ],
+            )
+            response_model: TaskDispatchGeneratorInfoOutput
 
-        response_model, tokens = await self.run(
-            output_type=TaskDispatchGeneratorInfoOutput,
-            input=[
-                {
-                    "role": MessageRole.SYSTEM,
-                    "content": prompt.task_analyst_prompt(
-                        TaskDispatchGeneratorInfoOutput
+            async with get_async_tx_session_direct() as session:
+                if not response_model.is_splittable:
+                    # 记录审计日志
+                    await audits_log_service.create(
+                        create_model=AuditLLMlogModel(
+                            session_id=create_model.session_id,
+                            thinking=response_model.thinking,
+                            message="不创建任务",
+                            tokens=tokens.model_dump(),
+                        ).to_audit_log(),
+                        session=session,
+                    )
+                    return response_model.thinking
+
+                # 1. 先创建工作空间, 生成需求 PRD 等.
+                workspace = await tasks_workspace_service.create(
+                    create_model=TaskWorkspaceCreateModel(prd=response_model.prd),
+                    session=session,
+                )
+
+                expect_execute_time = (
+                    response_model.expect_execute_time.get_utc_datetime()
+                )
+
+                # 2. 再创建任务
+                task = await tasks_service.create(
+                    create_model=TaskCreateModel(
+                        workspace_id=workspace.id,
+                        session_id=create_model.session_id,
+                        owner=create_model.owner,
+                        owner_timezone=create_model.owner_timezone,
+                        original_user_input=create_model.original_user_input,
+                        name=response_model.name,
+                        expect_execute_time=expect_execute_time,
+                        keywords=response_model.keywords,
                     ),
-                },
-                {
-                    "role": MessageRole.USER,
-                    "content": create_model.to_json_markdown(),
-                },
-            ],
-        )
-        response_model: TaskDispatchGeneratorInfoOutput
+                    session=session,
+                )
 
-        async with get_async_tx_session_direct() as session:
-            if not response_model.is_splittable:
-                # 记录审计日志
+                # 3. 记录审计日志
                 await audits_log_service.create(
                     create_model=AuditLLMlogModel(
                         session_id=create_model.session_id,
                         thinking=response_model.thinking,
-                        message="不创建任务",
+                        message=f"任务创建成功: {task.id}",
                         tokens=tokens.model_dump(),
                     ).to_audit_log(),
                     session=session,
                 )
-                return response_model.thinking
 
-            # 1. 先创建工作空间, 生成需求 PRD 等.
-            workspace = await tasks_workspace_service.create(
-                create_model=TaskWorkspaceCreateModel(prd=response_model.prd),
-                session=session,
-            )
-
-            expect_execute_time = response_model.expect_execute_time.get_utc_datetime(
-                create_model.owner_timezone
-            )
-
-            # 2. 再创建任务
-            task = await tasks_service.create(
-                create_model=TaskCreateModel(
-                    workspace_id=workspace.id,
-                    session_id=create_model.session_id,
-                    owner=create_model.owner,
-                    owner_timezone=create_model.owner_timezone,
-                    original_user_input=create_model.original_user_input,
-                    name=response_model.name,
-                    expect_execute_time=expect_execute_time,
-                    keywords=response_model.keywords,
-                ),
-                session=session,
-            )
-
-            # 3. 记录审计日志
-            await audits_log_service.create(
-                create_model=AuditLLMlogModel(
-                    session_id=create_model.session_id,
-                    thinking=response_model.thinking,
-                    message=f"任务创建成功: {task.id}",
-                    tokens=tokens.model_dump(),
-                ).to_audit_log(),
-                session=session,
-            )
-
-        # 4. 将任务加入就绪队列
-        await call_soon_task(task_id=task.id)
-        return task
+            # 4. 将任务加入就绪队列
+            await call_soon_task(task_id=task.id)
+            return task
+        except Exception as exc:
+            return str(exc)
 
     async def generator_task_planning(self, task_id: int):
         async with get_async_tx_session_direct() as session:
@@ -408,255 +430,316 @@ class TaskAgent(Agent):
                 )
 
     async def waiting_task(self, task_id: int, user_message: str):
-        # 处理用户反馈的信息. 更新 Process 并将任务重新入队.
-        async with get_async_tx_session_direct() as session:
-            task = await tasks_service.get(task_id=task_id, session=session)
-            notify_user = await tasks_chat_service.get_last_message(
-                task_id=task_id, role=MessageRole.ASSISTANT, session=session
-            )
+        try:
+            # 处理用户反馈的信息. 更新 Process 并将任务重新入队.
+            async with get_async_tx_session_direct() as session:
+                task = await tasks_service.get(task_id=task_id, session=session)
+                notify_user = await tasks_chat_service.get_last_message(
+                    task_id=task_id, role=MessageRole.ASSISTANT, session=session
+                )
 
-            workspace = await tasks_workspace_service.get(
-                workspace_id=task.workspace_id, session=session
-            )
+                workspace = await tasks_workspace_service.get(
+                    workspace_id=task.workspace_id, session=session
+                )
 
-            # 更新执行计划
-            response_model, tokens = await self.run(
-                output_type=TaskDispatchUpdatePlanningOutput,
-                input=[
-                    {
-                        "role": MessageRole.SYSTEM,
-                        "content": prompt.task_waiting_handle_prompt(
-                            output_cls=TaskDispatchUpdatePlanningOutput
-                        ),
-                    },
-                    {
-                        "role": MessageRole.USER,
-                        "content": TaskDispatchUpdatePlanningInput(
-                            process=workspace.process,
-                            notify_user=notify_user.message,  # pyright: ignore[reportOptionalMemberAccess]
-                            user_message=user_message,
-                        ).to_json_markdown(),
-                    },
-                ],
-            )
-            response_model: TaskDispatchUpdatePlanningOutput
+                # 更新执行计划
+                response_model, tokens = await self.run(
+                    output_type=TaskDispatchUpdatePlanningOutput,
+                    input=[
+                        {
+                            "role": MessageRole.SYSTEM,
+                            "content": prompt.task_waiting_handle_prompt(
+                                output_cls=TaskDispatchUpdatePlanningOutput
+                            ),
+                        },
+                        {
+                            "role": MessageRole.USER,
+                            "content": TaskDispatchUpdatePlanningInput(
+                                process=workspace.process,
+                                notify_user=notify_user.message,  # pyright: ignore[reportOptionalMemberAccess]
+                                user_message=user_message,
+                            ).to_json_markdown(),
+                        },
+                    ],
+                )
+                response_model: TaskDispatchUpdatePlanningOutput
 
-            await audits_log_service.create(
-                create_model=AuditLLMlogModel(
-                    session_id=task.session_id,
-                    thinking=response_model.thinking,
-                    message=f"用户反馈信息后成功更新执行计划. 反馈信息: {user_message}",
-                    tokens=tokens.model_dump(),
-                ).to_audit_log(),
-                session=session,
-            )
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking=response_model.thinking,
+                        message=f"用户反馈信息后成功更新执行计划. 反馈信息: {user_message}",
+                        tokens=tokens.model_dump(),
+                    ).to_audit_log(),
+                    session=session,
+                )
 
-            await tasks_service.update(
-                task_id=task.id,
-                update_model=TaskUpdateModel(state=TaskState.SCHEDULING),
-                session=session,
-            )
+                await tasks_service.update(
+                    task_id=task.id,
+                    update_model=TaskUpdateModel(state=TaskState.SCHEDULING),
+                    session=session,
+                )
 
-            await tasks_workspace_service.update(
-                workspace_id=task.workspace_id,
-                update_model=TaskWorkspaceUpdateModel(process=response_model.process),
-                session=session,
-            )
+                await tasks_workspace_service.update(
+                    workspace_id=task.workspace_id,
+                    update_model=TaskWorkspaceUpdateModel(
+                        process=response_model.process
+                    ),
+                    session=session,
+                )
 
-        # 加入调度 ..
-        await call_soon_task(task_id=task_id)
+            # 加入调度 ..
+            await call_soon_task(task_id=task_id)
+        except Exception as exc:
+            async with get_async_tx_session_direct() as session:
+                task = await tasks_service.get(task_id=task_id, session=session)
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking="任务补充信息时报错了, 但不尝试重置其状态",
+                        message=str(exc),
+                        tokens=Tokens().model_dump(),
+                    ).to_audit_log(),
+                    session=session,
+                )
 
     async def running_task(self, task_id: int):
         """
         Unit 触发任务继续执行.
         """
 
-        # 获取当前的执行单元的 output, 并根据 output 来更新 process.
-        async with get_async_tx_session_direct() as session:
-            task = await tasks_service.get(task_id=task_id, session=session)
+        try:
+            # 获取当前的执行单元的 output, 并根据 output 来更新 process.
+            async with get_async_tx_session_direct() as session:
+                task = await tasks_service.get(task_id=task_id, session=session)
 
-            # 任务正在被重构. 这里不要再继续了.
-            if task.state == TaskState.UPDATING:
-                return
+                # 任务正在被重构. 这里不要再继续了.
+                if task.state == TaskState.UPDATING:
+                    return
 
-            workspace = await tasks_workspace_service.get(
-                workspace_id=task.workspace_id, session=session
-            )
+                workspace = await tasks_workspace_service.get(
+                    workspace_id=task.workspace_id, session=session
+                )
 
-            process = workspace.process
+                process = workspace.process
 
-            curr_units = await tasks_unit_service.get_round_units(
-                round_id=task.curr_round_id, session=session
-            )
-
-            curr_units_content = [
-                TaskUnitDispatchInput.model_validate(unit).model_dump()
-                for unit in curr_units
-            ]
-
-            # 根据 units 的反馈, 来更新当前的 process 以及任务状态
-            response_model, tokens = await self.run(
-                output_type=TaskDispatchGeneratorNextStateOutput,
-                input=[
-                    {
-                        "role": MessageRole.SYSTEM,
-                        "content": prompt.task_run_next_prompt(
-                            output_cls=TaskDispatchGeneratorNextStateOutput,
-                            unit_content=curr_units_content,
-                            chats=[
-                                TaskChatInCrudModel.model_validate(chat).model_dump()
-                                for chat in task.chats
-                            ],
-                        ),
-                    },
-                    {"role": MessageRole.USER, "content": process},
-                ],
-            )
-            response_model: TaskDispatchGeneratorNextStateOutput
-
-            await tasks_history_service.create(
-                create_model=TaskHistoryCreateModel(
-                    task_id=task.id,
-                    state=TaskState(response_model.state),
-                    thinking=response_model.thinking,
-                    process=response_model.process,
-                ),
-                session=session,
-            )
-
-            await audits_log_service.create(
-                create_model=AuditLLMlogModel(
-                    session_id=task.session_id,
-                    thinking=response_model.thinking,
-                    message=f"任务的状态和 Process 更新推进, 新状态为: {response_model.state}",
-                    tokens=tokens.model_dump(),
-                ).to_audit_log(),
-                session=session,
-            )
-
-            await tasks_workspace_service.update(
-                workspace_id=task.workspace_id,
-                update_model=TaskWorkspaceUpdateModel(process=response_model.process),
-                session=session,
-            )
-
-            if response_model.state != task.state:
-                # 清理当前的 round, 因为我们要派发新一轮的了
-                await tasks_unit_service.clear_round_units(
+                curr_units = await tasks_unit_service.get_round_units(
                     round_id=task.curr_round_id, session=session
                 )
 
-                # 设置为新状态
-                await tasks_service.update(
-                    task_id=task.id,
-                    update_model=TaskUpdateModel(
-                        state=TaskState(response_model.state.value)
-                    ),
-                    session=session,
-                )
-
-        if response_model.state == TaskState.ACTIVATING:
-            # 生成执行单元
-            await self.generator_task_unit(task_id=task_id)
-            # 运行执行单元
-            await self.execute_task_unit(task_id=task_id)
-        if response_model.state == TaskState.SCHEDULING:
-            async with get_async_tx_session_direct() as session:
-                # 计算下次执行时间
-                await tasks_service.update(
-                    task_id=task.id,
-                    update_model=TaskUpdateModel(
-                        expect_execute_time=response_model.next_execute_time.get_utc_datetime()
-                    ),
-                    session=session,
-                )
-        elif response_model.state == TaskState.WAITING:
-            async with get_async_tx_session_direct() as session:
-                # waiting 需要用户补充信息
-                await tasks_chat_service.create(
-                    create_model=TaskChatCreateModel(
-                        role=MessageRole.ASSISTANT,
-                        task_id=task.id,
-                        message=typing.cast("str", response_model.notify_user),
-                    ),
-                    session=session,
-                )
-        else:
-            async with get_async_tx_session_direct() as session:
-                all_units = await tasks_unit_service.get_by_task(
-                    task_id=task_id, session=session
-                )
-                all_units = [
-                    TaskUnitDispatchInput.model_validate(unit) for unit in all_units
+                curr_units_content = [
+                    TaskUnitDispatchInput.model_validate(unit).model_dump()
+                    for unit in curr_units
                 ]
-                result_model, tokens = await self.run(
-                    output_type=TaskDispatchGeneratorResultOutput,
+
+                # 根据 units 的反馈, 来更新当前的 process 以及任务状态
+                response_model, tokens = await self.run(
+                    output_type=TaskDispatchGeneratorNextStateOutput,
                     input=[
                         {
                             "role": MessageRole.SYSTEM,
-                            "content": prompt.task_run_result_prompt(
-                                TaskDispatchGeneratorResultOutput
+                            "content": prompt.task_run_next_prompt(
+                                output_cls=TaskDispatchGeneratorNextStateOutput,
+                                unit_content=curr_units_content,
+                                chats=[
+                                    TaskChatInCrudModel.model_validate(
+                                        chat
+                                    ).model_dump()
+                                    for chat in task.chats
+                                ],
                             ),
                         },
-                        {
-                            "role": MessageRole.USER,
-                            "content": TaskDispatchGeneratorResultInput(
-                                prd=workspace.prd,
-                                process=workspace.process,
-                                all_units=all_units,
-                            ).to_json_markdown(),
-                        },
+                        {"role": MessageRole.USER, "content": process},
                     ],
                 )
-                result_model: TaskDispatchGeneratorResultOutput
+                response_model: TaskDispatchGeneratorNextStateOutput
+
+                await tasks_history_service.create(
+                    create_model=TaskHistoryCreateModel(
+                        task_id=task.id,
+                        state=TaskState(response_model.state),
+                        thinking=response_model.thinking,
+                        process=response_model.process,
+                    ),
+                    session=session,
+                )
+
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking=response_model.thinking,
+                        message=f"任务的状态和 Process 更新推进, 新状态为: {response_model.state}",
+                        tokens=tokens.model_dump(),
+                    ).to_audit_log(),
+                    session=session,
+                )
 
                 await tasks_workspace_service.update(
                     workspace_id=task.workspace_id,
-                    update_model=TaskWorkspaceUpdateModel(result=result_model.result),
+                    update_model=TaskWorkspaceUpdateModel(
+                        process=response_model.process
+                    ),
+                    session=session,
+                )
+
+                if response_model.state != task.state:
+                    # 清理当前的 round, 因为我们要派发新一轮的了
+                    await tasks_unit_service.clear_round_units(
+                        round_id=task.curr_round_id, session=session
+                    )
+
+                    # 设置为新状态
+                    await tasks_service.update(
+                        task_id=task.id,
+                        update_model=TaskUpdateModel(
+                            state=TaskState(response_model.state.value)
+                        ),
+                        session=session,
+                    )
+
+            if response_model.state == TaskState.ACTIVATING:
+                # 生成执行单元
+                await self.generator_task_unit(task_id=task_id)
+                # 运行执行单元
+                await self.execute_task_unit(task_id=task_id)
+            if response_model.state == TaskState.SCHEDULING:
+                async with get_async_tx_session_direct() as session:
+                    # 计算下次执行时间
+                    await tasks_service.update(
+                        task_id=task.id,
+                        update_model=TaskUpdateModel(
+                            expect_execute_time=response_model.next_execute_time.get_utc_datetime()
+                        ),
+                        session=session,
+                    )
+            elif response_model.state == TaskState.WAITING:
+                async with get_async_tx_session_direct() as session:
+                    # waiting 需要用户补充信息
+                    await tasks_chat_service.create(
+                        create_model=TaskChatCreateModel(
+                            role=MessageRole.ASSISTANT,
+                            task_id=task.id,
+                            message=typing.cast("str", response_model.notify_user),
+                        ),
+                        session=session,
+                    )
+            else:
+                async with get_async_tx_session_direct() as session:
+                    all_units = await tasks_unit_service.get_by_task(
+                        task_id=task_id, session=session
+                    )
+                    all_units = [
+                        TaskUnitDispatchInput.model_validate(unit) for unit in all_units
+                    ]
+                    result_model, tokens = await self.run(
+                        output_type=TaskDispatchGeneratorResultOutput,
+                        input=[
+                            {
+                                "role": MessageRole.SYSTEM,
+                                "content": prompt.task_run_result_prompt(
+                                    TaskDispatchGeneratorResultOutput
+                                ),
+                            },
+                            {
+                                "role": MessageRole.USER,
+                                "content": TaskDispatchGeneratorResultInput(
+                                    prd=workspace.prd,
+                                    process=workspace.process,
+                                    all_units=all_units,
+                                ).to_json_markdown(),
+                            },
+                        ],
+                    )
+                    result_model: TaskDispatchGeneratorResultOutput
+
+                    await tasks_workspace_service.update(
+                        workspace_id=task.workspace_id,
+                        update_model=TaskWorkspaceUpdateModel(
+                            result=result_model.result
+                        ),
+                        session=session,
+                    )
+        except Exception as exc:
+            logger.error(f"执行任务时失败: {exc}")
+
+            async with get_async_tx_session_direct() as session:
+                task = await tasks_service.update(
+                    task_id=task_id,
+                    update_model=TaskUpdateModel(state=TaskState.FAILED),
+                    session=session,
+                )
+
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking="任务执行时报错了, 将其置为 failed.",
+                        message=str(exc),
+                        tokens=Tokens().model_dump(),
+                    ).to_audit_log(),
                     session=session,
                 )
 
     async def execute_task(self, task_id: int):
-        logger.info(f"就绪队列消费: {task_id}")
+        try:
+            logger.info(f"就绪队列消费: {task_id}")
 
-        async with get_async_tx_session_direct() as session:
-            task = await tasks_service.get(task_id=task_id, session=session)
-            if task.state != TaskState.QUEUING:
-                match task.state:
-                    case state if state in [TaskState.CANCELLED]:
-                        logger.info("任务非正常出队, 已被用户取消. 放弃该任务")
-                        return
-                    case state if state in [TaskState.FAILED, TaskState.FINISHED]:
-                        logger.info("任务非正常出队, 已进入结束态. 放弃该任务")
-                        return
-                    case _:
-                        logger.info("任务非正常出队, 状态可恢复. 尝试恢复中...")
-                        await call_soon_task(task_id=task_id)
-                        return
+            async with get_async_tx_session_direct() as session:
+                task = await tasks_service.get(task_id=task_id, session=session)
+                if task.state != TaskState.QUEUING:
+                    match task.state:
+                        case state if state in [TaskState.CANCELLED]:
+                            logger.info("任务非正常出队, 已被用户取消. 放弃该任务")
+                            return
+                        case state if state in [TaskState.FAILED, TaskState.FINISHED]:
+                            logger.info("任务非正常出队, 已进入结束态. 放弃该任务")
+                            return
+                        case _:
+                            logger.info("任务非正常出队, 状态可恢复. 尝试恢复中...")
+                            await call_soon_task(task_id=task_id)
+                            return
 
-            await tasks_service.update(
-                task_id=task_id,
-                update_model=TaskUpdateModel(state=TaskState.ACTIVATING),
-                session=session,
-            )
+                await tasks_service.update(
+                    task_id=task_id,
+                    update_model=TaskUpdateModel(state=TaskState.ACTIVATING),
+                    session=session,
+                )
 
-        # 生成执行计划
-        await self.generator_task_planning(task_id=task_id)
+            # 生成执行计划
+            await self.generator_task_planning(task_id=task_id)
 
-        # 生成执行单元
-        await self.generator_task_unit(task_id=task_id)
+            # 生成执行单元
+            await self.generator_task_unit(task_id=task_id)
 
-        # 运行执行单元
-        await self.execute_task_unit(task_id=task_id)
+            # 运行执行单元
+            await self.execute_task_unit(task_id=task_id)
+        except Exception as exc:
+            logger.error(f"执行任务时失败: {exc}")
 
-    async def refactor_task(self, update_model: TaskDispatchRefactorModel):
+            async with get_async_tx_session_direct() as session:
+                task = await tasks_service.update(
+                    task_id=task_id,
+                    update_model=TaskUpdateModel(state=TaskState.FAILED),
+                    session=session,
+                )
+
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking="任务执行时报错了, 将其置为 failed.",
+                        message=str(exc),
+                        tokens=Tokens().model_dump(),
+                    ).to_audit_log(),
+                    session=session,
+                )
+
+    async def refactor_task(self, update_model: TaskDispatchRefactorModel) -> Tasks:
         """
         重构任务
         """
         task_id = update_model.task_id
 
         async with get_async_tx_session_direct() as session:
-            await tasks_service.update(
+            task = await tasks_service.update(
                 task_id=task_id,
                 update_model=TaskUpdateModel(
                     state=TaskState.UPDATING,
@@ -667,64 +750,100 @@ class TaskAgent(Agent):
                 session=session,
             )
 
+        try:
             # 生成新的 prd
+            response_model, tokens = await self.run(
+                output_type=TaskDispatchRefactorInfoOutput,
+                input=[
+                    {
+                        "role": MessageRole.SYSTEM,
+                        "content": prompt.task_refactor_prompt(
+                            TaskDispatchGeneratorInfoOutput
+                        ),
+                    },
+                    {
+                        "role": MessageRole.USER,
+                        "content": update_model.update_user_prompt,
+                    },
+                ],
+            )
 
-        response_model, tokens = await self.run(
-            output_type=TaskDispatchRefactorInfoOutput,
-            input=[
-                {
-                    "role": MessageRole.SYSTEM,
-                    "content": prompt.task_refactor_prompt(
-                        TaskDispatchGeneratorInfoOutput
+            response_model: TaskDispatchGeneratorInfoOutput
+
+            async with get_async_tx_session_direct() as session:
+                task = await tasks_service.refactor(task_id=task_id, session=session)
+
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking=response_model.thinking,
+                        message=f"用户更新任务信息成功, 任务已被重构: {response_model.thinking}",
+                        tokens=tokens.model_dump(),
+                    ).to_audit_log(),
+                    session=session,
+                )
+
+                await tasks_service.update(
+                    task_id=task_id,
+                    update_model=TaskUpdateModel(
+                        name=response_model.name,
+                        state=TaskState.SCHEDULING,
+                        prev_round_id=None,
+                        curr_round_id=None,
+                        lasted_execute_time=None,
+                        keywords=response_model.keywords,
+                        expect_execute_time=response_model.expect_execute_time.get_utc_datetime(),
                     ),
-                },
-                {
-                    "role": MessageRole.USER,
-                    "content": update_model.update_user_prompt,
-                },
-            ],
-        )
+                    session=session,
+                )
 
-        response_model: TaskDispatchGeneratorInfoOutput
-
-        async with get_async_tx_session_direct() as session:
-            task = await tasks_service.refactor(task_id=task_id, session=session)
-
-            await audits_log_service.create(
-                create_model=AuditLLMlogModel(
-                    session_id=task.session_id,
-                    thinking=response_model.thinking,
-                    message=f"用户更新任务信息成功, 任务已被重构: {response_model.thinking}",
-                    tokens=tokens.model_dump(),
-                ).to_audit_log(),
-                session=session,
-            )
-
-            await tasks_service.update(
-                task_id=task_id,
-                update_model=TaskUpdateModel(
-                    name=response_model.name,
-                    state=TaskState.SCHEDULING,
-                    prev_round_id=None,
-                    curr_round_id=None,
-                    lasted_execute_time=None,
-                    keywords=response_model.keywords,
-                    expect_execute_time=response_model.expect_execute_time.get_utc_datetime(
-                        task.owner_timezone
+                await tasks_workspace_service.update(
+                    workspace_id=task.workspace_id,
+                    update_model=TaskWorkspaceUpdateModel(
+                        prd=response_model.prd, process=None, result=None
                     ),
-                ),
-                session=session,
-            )
+                    session=session,
+                )
 
-            await tasks_workspace_service.update(
-                workspace_id=task.workspace_id,
-                update_model=TaskWorkspaceUpdateModel(
-                    prd=response_model.prd, process=None, result=None
-                ),
-                session=session,
-            )
+            await call_soon_task(task_id=task_id)
+            return task
 
-        await call_soon_task(task_id=task_id)
+        except Exception as exc:
+            async with get_async_tx_session_direct() as session:
+                await audits_log_service.create(
+                    create_model=AuditLLMlogModel(
+                        session_id=task.session_id,
+                        thinking="任务重构时报错了, 但不尝试重置其状态",
+                        message=str(exc),
+                        tokens=Tokens().model_dump(),
+                    ).to_audit_log(),
+                    session=session,
+                )
+                return task
+
+
+async def get_agent_factory(
+    task_id: int | None = None, session_id: str | None = None
+) -> TaskAgent:
+    model = None
+
+    if not session_id and not task_id:
+        raise Exception("缺少 SessionID 和 TaskID. 无法获取模型信息")
+
+    if session_id:
+        model = await get_llm_model(session_id=session_id)
+    elif task_id:
+        async with get_async_session_direct() as session:
+            task = await tasks_service.get(task_id=task_id, session=session)
+            model = await get_llm_model(task.session_id)
+
+    agent = TaskAgent(
+        name="Task-Dispatch-Agent",
+        instructions="任务调度 Agent. 您的所有输出语言都必须以用户输入语言为准. 您的所有时间来源和计算均为 **UTC** 时区, 不要擅自更改时区.",
+        model=model,
+        tools=[send_a2a_message],
+    )
+    return agent
 
 
 async def call_soon_task(task_id: int):
@@ -739,7 +858,10 @@ async def call_soon_task(task_id: int):
         if expect_execute_time <= datetime.now(timezone.utc):
             await tasks_service.update(
                 task_id=task_id,
-                update_model=TaskUpdateModel(state=TaskState.QUEUING),
+                update_model=TaskUpdateModel(
+                    state=TaskState.QUEUING,
+                    lasted_execute_time=datetime.now(timezone.utc),
+                ),
                 session=session,
             )
 
@@ -751,18 +873,15 @@ async def refactor_task(update_model: TaskDispatchRefactorModel) -> Tasks:
     """
     重构任务
     """
-    pass
+    agent = await get_agent_factory(task_id=update_model.task_id)
+    return await agent.refactor_task(update_model)
 
 
 async def create_task(create_model: TaskDispatchCreateModel) -> Tasks | str:
     """
     创建任务
     """
-    agent = TaskAgent(
-        name="Task-Analyst-Agent",
-        instructions="任务分析 Agent. 您的所有输出语言都必须已用户输入语言为准.",
-        model="gpt-4.1",
-    )
+    agent = await get_agent_factory(session_id=create_model.session_id)
     return await agent.create_task(create_model=create_model)
 
 
@@ -770,11 +889,7 @@ async def execute_task(task_id: int):
     """
     开始执行任务
     """
-    agent = TaskAgent(
-        name="Task-Dispatch-Agent",
-        instructions="任务调度 Agent. 您的所有输出语言都必须已用户输入语言为准.",
-        model="gpt-4.1",
-    )
+    agent = await get_agent_factory(task_id=task_id)
     return await agent.execute_task(task_id=task_id)
 
 
@@ -782,11 +897,7 @@ async def running_task(task_id: int):
     """
     继续运行任务
     """
-    agent = TaskAgent(
-        name="Task-Dispatch-Agent",
-        instructions="任务调度 Agent. 您的所有输出语言都必须已用户输入语言为准.",
-        model="gpt-4.1",
-    )
+    agent = await get_agent_factory(task_id=task_id)
     return await agent.running_task(task_id=task_id)
 
 
@@ -794,9 +905,5 @@ async def add_user_message(task_id: int, user_message: str) -> None:
     """
     用户补充任务信息
     """
-    agent = TaskAgent(
-        name="Task-Dispatch-Agent",
-        instructions="任务调度 Agent. 您的所有输出语言都必须已用户输入语言为准.",
-        model="gpt-4.1",
-    )
+    agent = await get_agent_factory(task_id=task_id)
     asyncio.create_task(agent.waiting_task(task_id=task_id, user_message=user_message))

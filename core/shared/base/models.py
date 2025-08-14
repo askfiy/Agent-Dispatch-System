@@ -183,4 +183,3 @@ class LLMOutputModel(BaseModel):
         if inspect.isclass(tp) and issubclass(tp, BaseModel):
             return tp
         return None
-
