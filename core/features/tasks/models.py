@@ -1,5 +1,6 @@
 import uuid
 import datetime
+from typing import Any
 
 from pydantic import field_serializer
 
@@ -43,6 +44,7 @@ class TaskCreateModel(BaseModel):
     owner_timezone: str
     keywords: list[str]
     original_user_input: str
+    mcp_server_infos: dict[str, Any]
 
     @field_serializer("keywords")
     def _validator_keywords(self, keywords: list[str]) -> str:

@@ -1,6 +1,6 @@
 import uuid
 import datetime
-from typing import Optional
+from typing import Optional, Any
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -75,6 +75,14 @@ class Tasks(BaseTableScheme):
         nullable=True,
         index=True,
         comment="任务最终执行时间",
+    )
+
+    mcp_server_infos: Mapped[dict[str, Any]] = mapped_column(
+        sa.JSON,
+        nullable=False,
+        default=sa.func.json_object(),
+        server_default=sa.text("JSON_OBJECT()"),
+        comment="MCP 列表",
     )
 
     owner: Mapped[str] = mapped_column(

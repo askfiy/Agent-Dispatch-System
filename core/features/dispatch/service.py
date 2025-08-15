@@ -2,13 +2,18 @@ import typing
 import uuid
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Sequence, AsyncGenerator
 from datetime import datetime, timezone
 from typing import Any, override
 
 from agents import Model
+from contextlib import asynccontextmanager
 
-from core.shared.components.openai.agent import Tokens
+from core.shared.components.openai.agent import (
+    Tokens,
+    get_mcp_servers,
+    close_mcp_servers,
+)
 from core.shared.globals import broker, Agent, RSession
 from core.shared.components.openai.agent import OutputSchemaType
 from core.shared.database.session import (
@@ -206,6 +211,7 @@ class TaskAgent(Agent):
                         name=response_model.name,
                         expect_execute_time=expect_execute_time,
                         keywords=response_model.keywords,
+                        mcp_server_infos=create_model.mcp_server_infos,
                     ),
                     session=session,
                 )
@@ -496,7 +502,7 @@ class TaskAgent(Agent):
                 await audits_log_service.create(
                     create_model=AuditLLMlogModel(
                         session_id=task.session_id,
-                        thinking="任务补充信息时报错了, 但不尝试重置其状态",
+                        thinking="任务补充信息时报错了, 但我们不重置其状态.",
                         message=str(exc),
                         tokens=Tokens().model_dump(),
                     ).to_audit_log(),
@@ -822,10 +828,14 @@ class TaskAgent(Agent):
                 return task
 
 
+@asynccontextmanager
 async def get_agent_factory(
-    task_id: int | None = None, session_id: str | None = None
-) -> TaskAgent:
+    task_id: int | None = None,
+    session_id: str | None = None,
+    mcp_server_infos: dict[str, Any] | None = None,
+) -> AsyncGenerator[TaskAgent]:
     model = None
+    mcp_server_infos = mcp_server_infos or {}
 
     if not session_id and not task_id:
         raise Exception("缺少 SessionID 和 TaskID. 无法获取模型信息")
@@ -836,14 +846,42 @@ async def get_agent_factory(
         async with get_async_session_direct() as session:
             task = await tasks_service.get(task_id=task_id, session=session)
             model = await get_llm_model(task.session_id)
+            mcp_server_infos = task.mcp_server_infos
+
+    mcp_servers = await get_mcp_servers(mcp_servers=mcp_server_infos)
 
     agent = TaskAgent(
         name="Task-Dispatch-Agent",
-        instructions="任务调度 Agent. 您的所有输出语言都必须以用户输入语言为准. 您的所有时间来源和计算均为 **UTC** 时区, 不要擅自更改时区.",
+        instructions="""
+        # 你的核心角色
+
+        任务调度 Agent.
+
+        # 你的核心原则
+
+        您的所有输出语言都必须以用户输入语言为准.
+        您的所有时间来源和计算均为 **UTC** 时区, 不要擅自更改时区.
+
+        # 你的核心工作
+
+        你负责对一个任务进行拆解, 执行, 状态推进. 这是你的主要任务.
+
+        在一个任务的不同阶段你将扮演不同的目标阶段性角色.
+
+        除此之外, 你也可以通过任务的形式直接同用户进行对话.
+
+        除开调度任务外, 你也可以通过自己的知识库或调用 TOOLS 来生产信息.
+
+        如用户要求 '讲个笑话' 等等. 对于你不知道的东西, 你应当直接表示不知道.
+        """,
         model=model,
+        mcp_servers=mcp_servers,
         tools=[send_a2a_message],
     )
-    return agent
+
+    yield agent
+
+    await close_mcp_servers(mcp_servers)
 
 
 async def call_soon_task(task_id: int):
@@ -869,41 +907,46 @@ async def call_soon_task(task_id: int):
         await Dispatch.send_to_ready_topic(task_id=task.id)
 
 
-async def refactor_task(update_model: TaskDispatchRefactorModel) -> Tasks:
-    """
-    重构任务
-    """
-    agent = await get_agent_factory(task_id=update_model.task_id)
-    return await agent.refactor_task(update_model)
-
-
 async def create_task(create_model: TaskDispatchCreateModel) -> Tasks | str:
     """
     创建任务
     """
-    agent = await get_agent_factory(session_id=create_model.session_id)
-    return await agent.create_task(create_model=create_model)
+    async with get_agent_factory(
+        session_id=create_model.session_id,
+        mcp_server_infos=create_model.mcp_server_infos,
+    ) as agent:
+        return await agent.create_task(create_model=create_model)
+
+
+async def refactor_task(update_model: TaskDispatchRefactorModel) -> Tasks:
+    """
+    重构任务
+    """
+    async with get_agent_factory(task_id=update_model.task_id) as agent:
+        return await agent.refactor_task(update_model)
 
 
 async def execute_task(task_id: int):
     """
     开始执行任务
     """
-    agent = await get_agent_factory(task_id=task_id)
-    return await agent.execute_task(task_id=task_id)
+    async with get_agent_factory(task_id=task_id) as agent:
+        return await agent.execute_task(task_id=task_id)
 
 
 async def running_task(task_id: int):
     """
     继续运行任务
     """
-    agent = await get_agent_factory(task_id=task_id)
-    return await agent.running_task(task_id=task_id)
+    async with get_agent_factory(task_id=task_id) as agent:
+        return await agent.running_task(task_id=task_id)
 
 
 async def add_user_message(task_id: int, user_message: str) -> None:
     """
     用户补充任务信息
     """
-    agent = await get_agent_factory(task_id=task_id)
-    asyncio.create_task(agent.waiting_task(task_id=task_id, user_message=user_message))
+    async with get_agent_factory(task_id=task_id) as agent:
+        asyncio.create_task(
+            agent.waiting_task(task_id=task_id, user_message=user_message)
+        )

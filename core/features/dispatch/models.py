@@ -1,5 +1,5 @@
-import uuid
 import datetime
+from typing import Any
 from pydantic import Field, model_validator
 
 from core.shared.enums import AgentTaskState
@@ -17,6 +17,7 @@ class TaskDispatchCreateModel(BaseModel):
     original_user_input: str
     owner_timezone: str = Field(default="UTC", exclude=True)
     session_id: str
+    mcp_server_infos: dict[str, Any]
 
 
 class TaskDispatchRefactorModel(BaseModel):
@@ -141,8 +142,9 @@ class TaskDispatchGeneratorNextStateOutput(LLMOutputModel):
             "已生成会议通知名单, 请确认是否有遗漏, 会议通知名单如下:\n1.张三\n2.李四 .."
         ],
     )
-    next_execute_time: LLMTimeField = Field(
-        description="当状态为 'scheduling' 时, 需填充该字段计算下一次的执行时间. 要求: **严格输出 UTC 时间**."
+    next_execute_time: LLMTimeField | None = Field(
+        default=None,
+        description="当状态为 'scheduling' 时, 需填充该字段计算下一次的执行时间. 要求: **严格输出 UTC 时间**.",
     )
 
 

@@ -12,6 +12,7 @@ from agents.agent_output import AgentOutputSchemaBase
 from agents.items import TResponseInputItem
 from agents.result import RunResult, RunResultStreaming
 from agents.util._types import MaybeAwaitable
+from agents.mcp import MCPServerStdio, MCPServerSse, MCPServerSseParams, MCPServer
 
 from core.shared.base.models import LLMOutputModel, BaseModel
 
@@ -24,6 +25,41 @@ class Tokens(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+
+
+async def get_mcp_servers(mcp_servers: dict[str, Any]):
+    servers: list[MCPServer] = []
+
+    for server_name, server_config in mcp_servers.items():
+        url = server_config.get("url")
+        if url:
+            server = MCPServerSse(
+                params=MCPServerSseParams(
+                    url=url,
+                    headers=server_config.get("headers", {}) or {},
+                    timeout=200.0,
+                    sse_read_timeout=300.0,
+                ),
+                cache_tools_list=True,
+                name=server_name,
+                client_session_timeout_seconds=300.0,
+            )
+
+        else:
+            continue
+
+        # else:
+        #     server = MCPServerStdio(name=server_name, params=server_config)
+
+        await server.connect()
+        servers.append(server)
+
+    return servers
+
+
+async def close_mcp_servers(mcp_servers: list[MCPServer]):
+    for server in reversed(mcp_servers):
+        await server.cleanup()
 
 
 class Agent:
