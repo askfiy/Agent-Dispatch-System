@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 from typing import override, Any
 from collections.abc import Sequence
 
@@ -253,4 +254,56 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
             .values(state=TaskState.QUEUING, lasted_execute_time=sa.func.now())
         )
 
+        print(tasks_id)
         return tasks_id
+
+    async def get_review_tasks_id(self) -> Sequence[int]:
+        # 入队时间或者 ACTIVATING 运行超过 20 分钟的
+        stmt = sa.select(self.model.id).where(
+            sa.not_(self.model.is_deleted),
+            self.model.state.in_([TaskState.ACTIVATING, TaskState.QUEUING]),
+            self.model.lasted_execute_time < sa.func.now() - timedelta(minutes=20),
+        )
+
+        result = await self.session.execute(stmt)
+
+        tasks_id = result.scalars().unique().all()
+
+        return tasks_id
+
+    async def get_tasks_by_session_ids(
+        self, session_ids: list[str], state: str | None = None
+    ) -> Sequence[Tasks]:
+        stmt = (
+            sa.select(self.model)
+            .where(
+                sa.not_(self.model.is_deleted), self.model.session_id.in_(session_ids)
+            )
+            .order_by(self.model.created_at.desc())
+        )
+
+        stmt = stmt.options(joinedload(self.model.workspace))
+
+        print(state)
+        if state == TaskState.WAITING.value:
+            stmt = stmt.where(self.model.state == TaskState.WAITING)
+        elif state == TaskState.FINISHED.value:
+            stmt = stmt.where(self.model.state == TaskState.FINISHED)
+        elif state == TaskState.FAILED.value:
+            stmt = stmt.where(
+                self.model.state.in_([TaskState.FAILED, TaskState.CANCELLED])
+            )
+        elif state == "in_progress":
+            stmt = stmt.where(
+                self.model.state.in_(
+                    [
+                        TaskState.ACTIVATING,
+                        TaskState.QUEUING,
+                        TaskState.INITIAL,
+                        TaskState.SCHEDULING,
+                    ]
+                )
+            )
+
+        result = await self.session.execute(stmt)
+        return result.scalars().unique().all()

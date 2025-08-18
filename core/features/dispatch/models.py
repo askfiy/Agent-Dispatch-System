@@ -139,7 +139,13 @@ class TaskDispatchGeneratorNextStateOutput(LLMOutputModel):
     notify_user: str | None = Field(
         description="需要通知用户的信息, 仅在新任务状态为 'WAITING' 时填充. 此字段必须包含明确内容, 需要用户确认的信息必须完整的写入.",
         examples=[
-            "已生成会议通知名单, 请确认是否有遗漏, 会议通知名单如下:\n1.张三\n2.李四 .."
+            "会议大纲宁酊成功, 需要一些必须的信息任务方可进行. 如参会人员名单, 参会人员联系方式. 会议大纲是否符合预期等."
+        ],
+    )
+    replenish: list[str] | None = Field(
+        description="需要通知用户的信息列表, 仅在新任务状态为 'WAITING' 时填充. 此字段必须是结构化的, 包含每一项需要用户补充的提示.",
+        examples=[
+            "['1. 请补充参会人员名单', '2. 请补充参会人员联系方式. 如: 张三 www.example.mail ...', '3. 请确认会议大纲.']"
         ],
     )
     next_execute_time: LLMTimeField | None = Field(

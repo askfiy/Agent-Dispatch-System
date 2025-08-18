@@ -9,6 +9,7 @@ from typing import Any, override
 from agents import Model
 from contextlib import asynccontextmanager
 
+from core.shared.base.models import LLMTimeField
 from core.shared.components.openai.agent import (
     Tokens,
     get_mcp_servers,
@@ -78,12 +79,14 @@ async def get_llm_model(session_id: str) -> Model:
 class Dispatch:
     # 正常调度器驱动任务
     ready_tasks_topic = "ready-tasks"
+    # 异常调度器检查任务
+    review_tasks_topic = "review-tasks"
     # Unit 核心驱动任务
     running_tasks_topic = "running-tasks"
 
     @classmethod
     async def start_ready_producer(cls):
-        """开始调度生产"""
+        """开始调度就绪任务"""
         while True:
             tasks_id = await get_dispatch_tasks_id()
             for task_id in tasks_id:
@@ -91,14 +94,14 @@ class Dispatch:
             await asyncio.sleep(60)
 
     @classmethod
-    async def start_ready_consumer(cls, message: dict[str, int]):
-        """消费就绪任务"""
-        await execute_task(task_id=message["task_id"])
-
-    @classmethod
-    async def start_running_consumer(cls, message: dict[str, int]):
-        """消费运行任务"""
-        await running_task(task_id=message["task_id"])
+    async def start_review_producer(cls):
+        """开始调度检查任务"""
+        while True:
+            tasks_id = await get_review_tasks_id()
+            for task_id in tasks_id:
+                await cls.send_to_review_topic(task_id=task_id)
+            # 10min
+            await asyncio.sleep(600)
 
     @classmethod
     async def send_to_ready_topic(cls, task_id: int):
@@ -111,15 +114,40 @@ class Dispatch:
         await broker.send(topic=cls.running_tasks_topic, message={"task_id": task_id})
 
     @classmethod
+    async def send_to_review_topic(cls, task_id: int):
+        """发送到检查队伍"""
+        await broker.send(topic=cls.review_tasks_topic, message={"task_id": task_id})
+
+    @classmethod
+    async def start_ready_consumer(cls, message: dict[str, int]):
+        """消费就绪任务"""
+        await execute_task(task_id=message["task_id"])
+
+    @classmethod
+    async def start_running_consumer(cls, message: dict[str, int]):
+        """消费运行任务"""
+        await running_task(task_id=message["task_id"])
+
+    @classmethod
+    async def start_review_consumer(cls, message: dict[str, int]):
+        """消费检查任务"""
+        await review_task(task_id=message["task_id"])
+
+    @classmethod
     async def start(cls):
         """启动调度器"""
         asyncio.create_task(cls.start_ready_producer())
+        asyncio.create_task(cls.start_review_producer())
 
         await broker.consumer(
             topic=cls.ready_tasks_topic, callback=cls.start_ready_consumer, count=5
         )
         await broker.consumer(
             topic=cls.running_tasks_topic, callback=cls.start_running_consumer, count=5
+        )
+
+        await broker.consumer(
+            topic=cls.review_tasks_topic, callback=cls.start_review_consumer, count=1
         )
 
     @classmethod
@@ -134,6 +162,14 @@ async def get_dispatch_tasks_id() -> Sequence[int]:
     """
     async with get_async_tx_session_direct() as session:
         return await tasks_service.get_dispatch_tasks_id(session=session)
+
+
+async def get_review_tasks_id() -> Sequence[int]:
+    """
+    获取检查任务
+    """
+    async with get_async_tx_session_direct() as session:
+        return await tasks_service.get_review_tasks_id(session=session)
 
 
 # ---- Task Agent ----
@@ -287,6 +323,7 @@ class TaskAgent(Agent):
             prev_units_content: list[dict[str, Any]],
             chats: list[dict[str, Any]],
             prd: str,
+            prd_created_time: datetime,
         ):
             async with get_async_tx_session_direct() as session:
                 unit: TasksUnit = await tasks_unit_service.get(
@@ -308,6 +345,7 @@ class TaskAgent(Agent):
                                 unit_content=prev_units_content,
                                 prd=prd,
                                 chats=chats,
+                                prd_created_time=prd_created_time,
                             ),
                         },
                         {
@@ -359,6 +397,7 @@ class TaskAgent(Agent):
                 workspace_id=task.workspace_id, session=session
             )
             prd = workspace.prd
+            prd_created_time = workspace.created_at
 
             chats = [
                 TaskChatInCrudModel.model_validate(chat).model_dump()
@@ -368,7 +407,9 @@ class TaskAgent(Agent):
         await asyncio.gather(
             *[
                 asyncio.create_task(
-                    _execute_unit(unit_id, prev_units_content, chats, prd)
+                    _execute_unit(
+                        unit_id, prev_units_content, chats, prd, prd_created_time
+                    )
                 )
                 for unit_id in curr_units
             ]
@@ -494,6 +535,8 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
+            await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
+
             # 加入调度 ..
             await call_soon_task(task_id=task_id)
         except Exception as exc:
@@ -603,6 +646,10 @@ class TaskAgent(Agent):
                         session=session,
                     )
 
+                    await XyzPlatformServer.send_task_refresh(
+                        session_id=task.session_id
+                    )
+
             if response_model.state == TaskState.ACTIVATING:
                 # 生成执行单元
                 await self.generator_task_unit(task_id=task_id)
@@ -614,7 +661,9 @@ class TaskAgent(Agent):
                     await tasks_service.update(
                         task_id=task.id,
                         update_model=TaskUpdateModel(
-                            expect_execute_time=response_model.next_execute_time.get_utc_datetime()
+                            expect_execute_time=typing.cast(
+                                "LLMTimeField", response_model.next_execute_time
+                            ).get_utc_datetime()
                         ),
                         session=session,
                     )
@@ -629,6 +678,16 @@ class TaskAgent(Agent):
                         ),
                         session=session,
                     )
+                # 调用业务层. 补充信息
+                await XyzPlatformServer.send_task_provision(
+                    session_id=task.session_id,
+                    task_id=str(task.id),
+                    description=typing.cast("str", response_model.notify_user),
+                    task_name=task.name,
+                    created_at=task.created_at.isoformat(),
+                    state=TaskState.WAITING.value,
+                    replenish=typing.cast("list[str]", response_model.replenish),
+                )
             else:
                 async with get_async_tx_session_direct() as session:
                     all_units = await tasks_unit_service.get_by_task(
@@ -685,6 +744,15 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
+            await XyzPlatformServer.send_task_result_notify(
+                task_id=str(task.id),
+                task_name=task.name,
+                state=task.state,
+                session_id=task.session_id,
+            )
+
+            await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
+
     async def execute_task(self, task_id: int):
         try:
             logger.info(f"就绪队列消费: {task_id}")
@@ -709,6 +777,8 @@ class TaskAgent(Agent):
                     update_model=TaskUpdateModel(state=TaskState.ACTIVATING),
                     session=session,
                 )
+
+            await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
 
             # 生成执行计划
             await self.generator_task_planning(task_id=task_id)
@@ -738,6 +808,8 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
+            await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
+
     async def refactor_task(self, update_model: TaskDispatchRefactorModel) -> Tasks:
         """
         重构任务
@@ -755,6 +827,8 @@ class TaskAgent(Agent):
                 ),
                 session=session,
             )
+
+            await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
 
         try:
             # 生成新的 prd
@@ -811,6 +885,7 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
+            await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
             await call_soon_task(task_id=task_id)
             return task
 
@@ -904,6 +979,7 @@ async def call_soon_task(task_id: int):
             )
 
     if expect_execute_time <= datetime.now(timezone.utc):
+        await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
         await Dispatch.send_to_ready_topic(task_id=task.id)
 
 
@@ -950,3 +1026,29 @@ async def add_user_message(task_id: int, user_message: str) -> None:
         asyncio.create_task(
             agent.waiting_task(task_id=task_id, user_message=user_message)
         )
+
+
+async def review_task(task_id: int):
+    """
+    检查任务
+    """
+    async with get_async_tx_session_direct() as session:
+        task = await tasks_service.update(
+            task_id=task_id,
+            update_model=TaskUpdateModel(
+                state=TaskState.FAILED,
+            ),
+            session=session,
+        )
+
+        await audits_log_service.create(
+            create_model=AuditLLMlogModel(
+                session_id=task.session_id,
+                thinking="任务补充信息时报错了, 但我们不重置其状态.",
+                message=f"任务调度超过特定时间. 最后进入调度队列的时间: {task.lasted_execute_time}",
+                tokens=Tokens().model_dump(),
+            ).to_audit_log(),
+            session=session,
+        )
+
+    await XyzPlatformServer.send_task_refresh(session_id=task.session_id)

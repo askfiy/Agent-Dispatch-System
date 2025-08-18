@@ -9,6 +9,23 @@ from core.shared.base.models import BaseModel
 
 from ..tasks_chat.models import TaskChatInCrudModel
 from ..tasks_history.models import TaskHistoryInCrudModel
+from ..tasks_workspace.models import TaskWorkspaceInCrudModel
+
+
+class TaskInXyzModel(BaseModel):
+    session_id: str
+
+    id: int
+    name: str
+    state: TaskState
+
+    expect_execute_time: datetime.datetime
+    lasted_execute_time: datetime.datetime | None = None
+
+    original_user_input: str
+    created_at: datetime.datetime
+
+    workspace: TaskWorkspaceInCrudModel
 
 
 class TaskInCrudModel(BaseModel):
@@ -29,6 +46,7 @@ class TaskInCrudModel(BaseModel):
     histories: list[TaskHistoryInCrudModel]
 
     lasted_execute_time: datetime.datetime | None = None
+    created_at: datetime.datetime
 
     @field_serializer("keywords")
     def _validator_keywords(self, keywords: str) -> list[str]:

@@ -1,5 +1,6 @@
 import fastapi
 from fastapi import Depends
+from typing import Literal
 
 from core.shared.database.session import (
     get_async_session,
@@ -16,13 +17,14 @@ from core.shared.models.http import (
 
 from . import service
 from .models import (
+    TaskInXyzModel,
     TaskInCrudModel,
     TaskCreateModel,
     TaskUpdateModel,
 )
 
 
-controller = fastapi.APIRouter(prefix="/tasks", tags=["tasks"], deprecated=True)
+controller = fastapi.APIRouter(prefix="/tasks", tags=["tasks"])
 
 
 @controller.get(
@@ -97,3 +99,22 @@ async def delete(
 ):
     result = await service.delete(task_id=task_id, session=session)
     return ResponseModel(result=result)
+
+
+@controller.post(
+    path="/get-by-sessions",
+    name="根据 sessionID 获取所有任务",
+    status_code=fastapi.status.HTTP_200_OK,
+    response_model=ResponseModel[list[TaskInXyzModel]],
+)
+async def get_by_sessions(
+    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
+    state: Literal["waiting", "finished", "failed", "in_progress"] | None = fastapi.Body(default=None, embed=True),
+    session: AsyncSession = Depends(get_async_session),
+) -> ResponseModel[list[TaskInXyzModel]]:
+    result = await service.get_by_sessions(
+        session_ids=session_ids, state=state, session=session
+    )
+    return ResponseModel(
+        result=[TaskInXyzModel.model_validate(task) for task in result]
+    )

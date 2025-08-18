@@ -68,3 +68,16 @@ async def upget_paginator(paginator: Paginator, session: AsyncSession) -> Pagina
 async def get_dispatch_tasks_id(session: AsyncTxSession) -> Sequence[int]:
     repo = TasksCrudRepository(session=session)
     return await repo.get_dispatch_tasks_id()
+
+async def get_review_tasks_id(session: AsyncTxSession) -> Sequence[int]:
+    repo = TasksCrudRepository(session=session)
+    return await repo.get_review_tasks_id()
+
+
+async def get_by_sessions(
+    session: AsyncSession,
+    session_ids: list[str],
+    state: str | None = None,
+) -> Sequence[Tasks]:
+    repo = TasksCrudRepository(session=session)
+    return await repo.get_tasks_by_session_ids(session_ids=session_ids, state=state)

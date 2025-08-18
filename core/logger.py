@@ -61,6 +61,10 @@ def setup_logging(level: int | str = logging.INFO) -> None:
 
     root_logger.addHandler(console_handler)
 
+    openai_agents_logger = logging.getLogger("openai.agents")
+    openai_agents_logger.propagate = False
+    openai_agents_logger.handlers.clear()
+
     uvicorn_access_logger = logging.getLogger("uvicorn.access")
     uvicorn_errors_logger = logging.getLogger("uvicorn.error")
 

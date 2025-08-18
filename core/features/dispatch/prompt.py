@@ -228,6 +228,7 @@ def task_run_unit_prompt(
     unit_content: list[dict[str, Any],],
     prd: str,
     chats: list[dict[str, Any]],
+    prd_created_time: datetime.datetime,
 ):
     utc_now = datetime.datetime.now(datetime.timezone.utc)
     formatted = utc_now.strftime("%Y-%m-%d %H:%M:%S")
@@ -287,6 +288,7 @@ THINKING
 当前 UTC 时间: {formatted}
 有关的执行单元执行信息: {unit_content}
 当前的需求 PRD: {prd}
+当前的需求 PRD 创建时间, 即任务创建的时间: {prd_created_time}
 任务和用户对话记录: {chats}
 """
 
