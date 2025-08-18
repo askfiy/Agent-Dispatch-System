@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 from sqlalchemy.orm.strategy_options import _AbstractLoad  # pyright: ignore[reportPrivateUsage]
 from sqlalchemy.orm.util import LoaderCriteriaOption
+from sqlalchemy.dialects.mysql import match
 
 from core.shared.enums import TaskState
 from core.shared.models.http import Paginator
@@ -284,7 +285,6 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
 
         stmt = stmt.options(joinedload(self.model.workspace))
 
-        print(state)
         if state == TaskState.WAITING.value:
             stmt = stmt.where(self.model.state == TaskState.WAITING)
         elif state == TaskState.FINISHED.value:
@@ -304,6 +304,48 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
                     ]
                 )
             )
+
+        result = await self.session.execute(stmt)
+        return result.scalars().unique().all()
+
+    async def get_tasks_count_by_session_ids(
+        self, session_ids: list[str], state: TaskState
+    ) -> int:
+        stmt = (
+            sa.select(self.model.id)
+            .where(
+                sa.not_(self.model.is_deleted),
+                self.model.session_id.in_(session_ids),
+                self.model.state == state,
+            )
+            .order_by(self.model.created_at.desc())
+        )
+
+        count_stmt = sa.select(sa.func.count()).select_from(stmt.subquery())
+        count = await self.session.execute(count_stmt)
+        return count.scalar_one()
+
+    async def get_tasks_by_keywords_and_session_ids(
+        self, session_ids: list[str], keywords: str
+    ) -> Sequence[Tasks]:
+        match_expr = match(
+            self.model.__table__.c.keywords,
+            against=keywords,
+            # in_boolean_mode=True,
+            in_natural_language_mode=True,
+            # with_query_expansion=True,
+        )
+        stmt = (
+            sa.select(self.model)
+            .where(
+                sa.not_(self.model.is_deleted),
+                self.model.session_id.in_(session_ids),
+                match_expr,
+            )
+            .order_by(sa.desc(match_expr))
+        )
+
+        stmt = stmt.options(joinedload(self.model.workspace))
 
         result = await self.session.execute(stmt)
         return result.scalars().unique().all()

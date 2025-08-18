@@ -35,7 +35,7 @@ async def create_task(create_model: TaskDispatchCreateModel):
 
 
 @controller.post(
-    path="/reactor",
+    path="/refactor",
     name="重构任务",
     status_code=fastapi.status.HTTP_200_OK,
     response_model=ResponseModel[bool],

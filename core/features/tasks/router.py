@@ -2,6 +2,7 @@ import fastapi
 from fastapi import Depends
 from typing import Literal
 
+from core.shared.enums import TaskState
 from core.shared.database.session import (
     get_async_session,
     get_async_tx_session,
@@ -109,7 +110,8 @@ async def delete(
 )
 async def get_by_sessions(
     session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
-    state: Literal["waiting", "finished", "failed", "in_progress"] | None = fastapi.Body(default=None, embed=True),
+    state: Literal["waiting", "finished", "failed", "in_progress"]
+    | None = fastapi.Body(default=None, embed=True),
     session: AsyncSession = Depends(get_async_session),
 ) -> ResponseModel[list[TaskInXyzModel]]:
     result = await service.get_by_sessions(
@@ -118,3 +120,39 @@ async def get_by_sessions(
     return ResponseModel(
         result=[TaskInXyzModel.model_validate(task) for task in result]
     )
+
+
+@controller.post(
+    path="/get-by-keywords-sessions",
+    name="根据 sessionID 和 自然语言筛选出所有任务",
+    status_code=fastapi.status.HTTP_200_OK,
+    response_model=ResponseModel[list[TaskInXyzModel]],
+)
+async def get_by_keywords_and_sessions(
+    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
+    keywords: str = fastapi.Body(embed=True),
+    session: AsyncSession = Depends(get_async_session),
+) -> ResponseModel[list[TaskInXyzModel]]:
+    result = await service.get_by_keywords_and_sessions(
+        session_ids=session_ids, keywords=keywords, session=session
+    )
+    return ResponseModel(
+        result=[TaskInXyzModel.model_validate(task) for task in result]
+    )
+
+
+@controller.post(
+    path="/get-count-by-sessions",
+    name="根据 sessionID 获取所有特定状态的任务数量",
+    status_code=fastapi.status.HTTP_200_OK,
+    response_model=ResponseModel[int],
+)
+async def get_count_by_sessions(
+    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
+    state: TaskState = fastapi.Body(default=TaskState.FINISHED, embed=True),
+    session: AsyncSession = Depends(get_async_session),
+) -> ResponseModel[int]:
+    result = await service.get_count_by_sessions(
+        session=session, session_ids=session_ids, state=state
+    )
+    return ResponseModel(result=result)

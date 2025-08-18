@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 
+from core.shared.enums import TaskState
 from core.shared.models.http import Paginator
 from core.shared.database.session import (
     AsyncSession,
@@ -69,6 +70,7 @@ async def get_dispatch_tasks_id(session: AsyncTxSession) -> Sequence[int]:
     repo = TasksCrudRepository(session=session)
     return await repo.get_dispatch_tasks_id()
 
+
 async def get_review_tasks_id(session: AsyncTxSession) -> Sequence[int]:
     repo = TasksCrudRepository(session=session)
     return await repo.get_review_tasks_id()
@@ -81,3 +83,21 @@ async def get_by_sessions(
 ) -> Sequence[Tasks]:
     repo = TasksCrudRepository(session=session)
     return await repo.get_tasks_by_session_ids(session_ids=session_ids, state=state)
+
+
+async def get_by_keywords_and_sessions(
+    session: AsyncSession, session_ids: list[str], keywords: str
+) -> Sequence[Tasks]:
+    repo = TasksCrudRepository(session=session)
+    return await repo.get_tasks_by_keywords_and_session_ids(
+        session_ids=session_ids, keywords=keywords
+    )
+
+
+async def get_count_by_sessions(
+    session: AsyncSession,
+    session_ids: list[str],
+    state: TaskState,
+) -> int:
+    repo = TasksCrudRepository(session=session)
+    return await repo.get_tasks_count_by_session_ids(session_ids=session_ids, state=state)
