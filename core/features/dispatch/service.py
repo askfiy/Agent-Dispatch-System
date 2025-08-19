@@ -5,6 +5,7 @@ import logging
 from collections.abc import Sequence, AsyncGenerator
 from datetime import datetime, timezone
 from typing import Any, override
+import traceback
 
 from agents import Model
 from contextlib import asynccontextmanager
@@ -21,7 +22,7 @@ from core.shared.database.session import (
     get_async_session_direct,
     get_async_tx_session_direct,
 )
-from core.shared.enums import TaskState, MessageRole, TaskUnitState
+from core.shared.enums import TaskState, MessageRole, TaskUnitState, AgentTaskState
 from ..tasks.scheme import Tasks
 from ..tasks_unit.scheme import TasksUnit
 from ..tasks.models import TaskCreateModel, TaskUpdateModel
@@ -58,6 +59,7 @@ from . import prompt
 from multi_agent_centre.core.model_provider import ModelAdapter
 from multi_agent_centre.core._a2a.tools import send_a2a_message
 from multi_agent_centre.api.xyz_platform import XyzPlatformServer
+from multi_agent_centre.core.utils import store_usage_by_session
 
 
 model_adapter = ModelAdapter()
@@ -101,7 +103,7 @@ class Dispatch:
             for task_id in tasks_id:
                 await cls.send_to_review_topic(task_id=task_id)
             # 10min
-            await asyncio.sleep(600)
+            await asyncio.sleep(1200)
 
     @classmethod
     async def send_to_ready_topic(cls, task_id: int):
@@ -184,6 +186,7 @@ class TaskAgent(Agent):
         output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
     ):
+        print("--- Call LLM ----")
         response, tokens = await super().run(
             input=input, session=session, output_type=output_type, **kwargs
         )
@@ -211,6 +214,17 @@ class TaskAgent(Agent):
                 ],
             )
             response_model: TaskDispatchGeneratorInfoOutput
+
+            asyncio.create_task(
+                store_usage_by_session(
+                    source="Task-Generator-Prd",
+                    model_name=self.model.model,
+                    input_token=tokens.input_tokens,
+                    output_token=tokens.output_tokens,
+                    cache_token=tokens.cached_tokens,
+                    session_id=create_model.session_id,
+                )
+            )
 
             async with get_async_tx_session_direct() as session:
                 if not response_model.is_splittable:
@@ -313,6 +327,18 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
+                self.model: Model
+                asyncio.create_task(
+                    store_usage_by_session(
+                        source="Task-Generator-Planning",
+                        model_name=self.model.model,
+                        input_token=tokens.input_tokens,
+                        output_token=tokens.output_tokens,
+                        cache_token=tokens.cached_tokens,
+                        session_id=task.session_id,
+                    )
+                )
+
     async def execute_task_unit(self, task_id: int):
         """
         开始执行所有执行单元
@@ -373,6 +399,17 @@ class TaskAgent(Agent):
                         tokens=tokens.model_dump(),
                     ).to_audit_log(),
                     session=session,
+                )
+
+                asyncio.create_task(
+                    store_usage_by_session(
+                        source="Task-Executor-Unit",
+                        model_name=self.model.model,
+                        input_token=tokens.input_tokens,
+                        output_token=tokens.output_tokens,
+                        cache_token=tokens.cached_tokens,
+                        session_id=task.session_id,
+                    )
                 )
 
         # 拿到所有的执行单元
@@ -462,6 +499,17 @@ class TaskAgent(Agent):
                 session=session,
             )
 
+            asyncio.create_task(
+                store_usage_by_session(
+                    source="Task-Generator-Unit",
+                    model_name=self.model.model,
+                    input_token=tokens.input_tokens,
+                    output_token=tokens.output_tokens,
+                    cache_token=tokens.cached_tokens,
+                    session_id=task.session_id,
+                )
+            )
+
             # 创建执行单元
             for unit in response_model.unit_list:
                 unit: TaskDispatchExecuteUnitInput
@@ -535,6 +583,17 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
+            asyncio.create_task(
+                store_usage_by_session(
+                    source="Task-Generator-Unit",
+                    model_name=self.model.model,
+                    input_token=tokens.input_tokens,
+                    output_token=tokens.output_tokens,
+                    cache_token=tokens.cached_tokens,
+                    session_id=task.session_id,
+                )
+            )
+
             await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
 
             # 加入调度 ..
@@ -603,6 +662,17 @@ class TaskAgent(Agent):
                 )
                 response_model: TaskDispatchGeneratorNextStateOutput
 
+                asyncio.create_task(
+                    store_usage_by_session(
+                        source="Task-Execute-Continue",
+                        model_name=self.model.model,
+                        input_token=tokens.input_tokens,
+                        output_token=tokens.output_tokens,
+                        cache_token=tokens.cached_tokens,
+                        session_id=task.session_id,
+                    )
+                )
+
                 await tasks_history_service.create(
                     create_model=TaskHistoryCreateModel(
                         task_id=task.id,
@@ -650,12 +720,12 @@ class TaskAgent(Agent):
                         session_id=task.session_id
                     )
 
-            if response_model.state == TaskState.ACTIVATING:
+            if response_model.state == AgentTaskState.ACTIVATING:
                 # 生成执行单元
                 await self.generator_task_unit(task_id=task_id)
                 # 运行执行单元
                 await self.execute_task_unit(task_id=task_id)
-            if response_model.state == TaskState.SCHEDULING:
+            elif response_model.state == AgentTaskState.SCHEDULING:
                 async with get_async_tx_session_direct() as session:
                     # 计算下次执行时间
                     await tasks_service.update(
@@ -667,7 +737,7 @@ class TaskAgent(Agent):
                         ),
                         session=session,
                     )
-            elif response_model.state == TaskState.WAITING:
+            elif response_model.state == AgentTaskState.WAITING:
                 async with get_async_tx_session_direct() as session:
                     # waiting 需要用户补充信息
                     await tasks_chat_service.create(
@@ -717,6 +787,17 @@ class TaskAgent(Agent):
                     )
                     result_model: TaskDispatchGeneratorResultOutput
 
+                    asyncio.create_task(
+                        store_usage_by_session(
+                            source="Task-Generator-Result",
+                            model_name=self.model.model,
+                            input_token=tokens.input_tokens,
+                            output_token=tokens.output_tokens,
+                            cache_token=tokens.cached_tokens,
+                            session_id=task.session_id,
+                        )
+                    )
+
                     await tasks_workspace_service.update(
                         workspace_id=task.workspace_id,
                         update_model=TaskWorkspaceUpdateModel(
@@ -724,8 +805,19 @@ class TaskAgent(Agent):
                         ),
                         session=session,
                     )
-        except Exception as exc:
-            logger.error(f"执行任务时失败: {exc}")
+
+                    await audits_log_service.create(
+                        create_model=AuditLLMlogModel(
+                            session_id=task.session_id,
+                            thinking=result_model.thinking,
+                            message=result_model.result,
+                            tokens=Tokens().model_dump(),
+                        ).to_audit_log(),
+                        session=session,
+                    )
+
+        except Exception:
+            logger.error(f"执行任务时失败: {traceback.format_exc()}")
 
             async with get_async_tx_session_direct() as session:
                 task = await tasks_service.update(
@@ -738,7 +830,7 @@ class TaskAgent(Agent):
                     create_model=AuditLLMlogModel(
                         session_id=task.session_id,
                         thinking="任务执行时报错了, 将其置为 failed.",
-                        message=str(exc),
+                        message=traceback.format_exc(),
                         tokens=Tokens().model_dump(),
                     ).to_audit_log(),
                     session=session,
@@ -788,8 +880,8 @@ class TaskAgent(Agent):
 
             # 运行执行单元
             await self.execute_task_unit(task_id=task_id)
-        except Exception as exc:
-            logger.error(f"执行任务时失败: {exc}")
+        except Exception:
+            logger.error(f"执行任务时失败: {traceback.format_exc()}")
 
             async with get_async_tx_session_direct() as session:
                 task = await tasks_service.update(
@@ -802,7 +894,7 @@ class TaskAgent(Agent):
                     create_model=AuditLLMlogModel(
                         session_id=task.session_id,
                         thinking="任务执行时报错了, 将其置为 failed.",
-                        message=str(exc),
+                        message=traceback.format_exc(),
                         tokens=Tokens().model_dump(),
                     ).to_audit_log(),
                     session=session,
@@ -849,6 +941,17 @@ class TaskAgent(Agent):
             )
 
             response_model: TaskDispatchGeneratorInfoOutput
+
+            asyncio.create_task(
+                store_usage_by_session(
+                    source="Task-Refactor-Prd",
+                    model_name=self.model.model,
+                    input_token=tokens.input_tokens,
+                    output_token=tokens.output_tokens,
+                    cache_token=tokens.cached_tokens,
+                    session_id=task.session_id,
+                )
+            )
 
             async with get_async_tx_session_direct() as session:
                 task = await tasks_service.refactor(task_id=task_id, session=session)
@@ -927,28 +1030,7 @@ async def get_agent_factory(
 
     agent = TaskAgent(
         name="Task-Dispatch-Agent",
-        instructions="""
-        # 你的核心角色
-
-        任务调度 Agent.
-
-        # 你的核心原则
-
-        您的所有输出语言都必须以用户输入语言为准.
-        您的所有时间来源和计算均为 **UTC** 时区, 不要擅自更改时区.
-
-        # 你的核心工作
-
-        你负责对一个任务进行拆解, 执行, 状态推进. 这是你的主要任务.
-
-        在一个任务的不同阶段你将扮演不同的目标阶段性角色.
-
-        除此之外, 你也可以通过任务的形式直接同用户进行对话.
-
-        除开调度任务外, 你也可以通过自己的知识库或调用 TOOLS 来生产信息.
-
-        如用户要求 '讲个笑话' 等等. 对于你不知道的东西, 你应当直接表示不知道.
-        """,
+        instructions=prompt.get_instructions(),
         model=model,
         mcp_servers=mcp_servers,
         tools=[send_a2a_message],
