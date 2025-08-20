@@ -255,7 +255,6 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
             .values(state=TaskState.QUEUING, lasted_execute_time=sa.func.now())
         )
 
-        print(tasks_id)
         return tasks_id
 
     async def get_review_tasks_id(self) -> Sequence[int]:

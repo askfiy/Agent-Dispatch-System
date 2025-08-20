@@ -5,11 +5,13 @@ import logging
 from collections.abc import Sequence, AsyncGenerator
 from datetime import datetime, timezone
 from typing import Any, override
+from dataclasses import dataclass
 import traceback
 
-from agents import Model
+from agents import Model, RunContextWrapper, function_tool
 from contextlib import asynccontextmanager
 
+from core.shared.database.session import AsyncTxSession
 from core.shared.base.models import LLMTimeField
 from core.shared.components.openai.agent import (
     Tokens,
@@ -177,6 +179,28 @@ async def get_review_tasks_id() -> Sequence[int]:
 # ---- Task Agent ----
 
 
+@dataclass
+class XyzContext:
+    session_id: str
+    user_id: str
+    agent_id: int
+
+
+@function_tool
+async def get_xyz_contenxt(wrapper: RunContextWrapper[XyzContext]) -> str:
+    """
+    Before calling any XYZ Platform tool. The tool should be called first to get the necessary information.
+    """
+
+    print("get_xyz_contenxt 运行. ..")
+
+    return (
+        f"Current conversation user_id: {wrapper.context.user_id}"
+        f"Current conversation agent_id: {wrapper.context.agent_id}"
+        f"Current conversation session_id: {wrapper.context.session_id}"
+    )
+
+
 class TaskAgent(Agent):
     @override
     async def run(
@@ -186,7 +210,6 @@ class TaskAgent(Agent):
         output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
     ):
-        print("--- Call LLM ----")
         response, tokens = await super().run(
             input=input, session=session, output_type=output_type, **kwargs
         )
@@ -611,6 +634,25 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
+    async def next_state(
+        self, task_id: int, new_state: AgentTaskState, session: AsyncTxSession
+    ):
+        task = await tasks_service.get(task_id=task_id, session=session)
+
+        # 清理当前的 round, 因为我们要派发新一轮的了
+        await tasks_unit_service.clear_round_units(
+            round_id=task.curr_round_id, session=session
+        )
+
+        # 设置为新状态
+        await tasks_service.update(
+            task_id=task.id,
+            update_model=TaskUpdateModel(state=TaskState(new_state.value)),
+            session=session,
+        )
+
+        await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
+
     async def running_task(self, task_id: int):
         """
         Unit 触发任务继续执行.
@@ -701,26 +743,12 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
-                if response_model.state != task.state:
-                    # 清理当前的 round, 因为我们要派发新一轮的了
-                    await tasks_unit_service.clear_round_units(
-                        round_id=task.curr_round_id, session=session
-                    )
-
-                    # 设置为新状态
-                    await tasks_service.update(
-                        task_id=task.id,
-                        update_model=TaskUpdateModel(
-                            state=TaskState(response_model.state.value)
-                        ),
-                        session=session,
-                    )
-
-                    await XyzPlatformServer.send_task_refresh(
-                        session_id=task.session_id
-                    )
-
             if response_model.state == AgentTaskState.ACTIVATING:
+                async with get_async_tx_session_direct() as session:
+                    await self.next_state(
+                        task_id, new_state=response_model.state, session=session
+                    )
+
                 # 生成执行单元
                 await self.generator_task_unit(task_id=task_id)
                 # 运行执行单元
@@ -737,6 +765,9 @@ class TaskAgent(Agent):
                         ),
                         session=session,
                     )
+                    await self.next_state(
+                        task_id, new_state=response_model.state, session=session
+                    )
             elif response_model.state == AgentTaskState.WAITING:
                 async with get_async_tx_session_direct() as session:
                     # waiting 需要用户补充信息
@@ -747,6 +778,9 @@ class TaskAgent(Agent):
                             message=typing.cast("str", response_model.notify_user),
                         ),
                         session=session,
+                    )
+                    await self.next_state(
+                        task_id, new_state=response_model.state, session=session
                     )
                 # 调用业务层. 补充信息
                 await XyzPlatformServer.send_task_provision(
@@ -814,6 +848,18 @@ class TaskAgent(Agent):
                             tokens=Tokens().model_dump(),
                         ).to_audit_log(),
                         session=session,
+                    )
+
+                    # 最后一步是先得出 Result 再更新状态
+                    await self.next_state(
+                        task_id, new_state=response_model.state, session=session
+                    )
+
+                    await XyzPlatformServer.send_task_result_notify(
+                        task_id=str(task_id),
+                        task_name=task.name,
+                        state=response_model.state,
+                        session_id=task.session_id,
                     )
 
         except Exception:
@@ -997,7 +1043,7 @@ class TaskAgent(Agent):
                 await audits_log_service.create(
                     create_model=AuditLLMlogModel(
                         session_id=task.session_id,
-                        thinking="任务重构时报错了, 但不尝试重置其状态",
+                        thinking=f"任务 {task_id} 重构时报错了, 但不尝试重置其状态",
                         message=str(exc),
                         tokens=Tokens().model_dump(),
                     ).to_audit_log(),
@@ -1025,6 +1071,12 @@ async def get_agent_factory(
             task = await tasks_service.get(task_id=task_id, session=session)
             model = await get_llm_model(task.session_id)
             mcp_server_infos = task.mcp_server_infos
+            session_id = task.session_id
+
+    session_id = typing.cast("str", session_id)
+    convsess_info = await XyzPlatformServer.get_info_by_session_id(
+        session_id=session_id
+    )
 
     mcp_servers = await get_mcp_servers(mcp_servers=mcp_server_infos)
 
@@ -1033,7 +1085,12 @@ async def get_agent_factory(
         instructions=prompt.get_instructions(),
         model=model,
         mcp_servers=mcp_servers,
-        tools=[send_a2a_message],
+        tools=[send_a2a_message, get_xyz_contenxt],
+        ctx=XyzContext(
+            session_id=session_id,
+            agent_id=convsess_info["agentId"],
+            user_id=convsess_info["userId"],
+        ),
     )
 
     yield agent
@@ -1127,7 +1184,7 @@ async def review_task(task_id: int):
             create_model=AuditLLMlogModel(
                 session_id=task.session_id,
                 thinking="任务补充信息时报错了, 但我们不重置其状态.",
-                message=f"任务调度超过特定时间. 最后进入调度队列的时间: {task.lasted_execute_time}",
+                message=f"任务 {task_id} 调度超过特定时间. 最后进入调度队列的时间: {task.lasted_execute_time}",
                 tokens=Tokens().model_dump(),
             ).to_audit_log(),
             session=session,

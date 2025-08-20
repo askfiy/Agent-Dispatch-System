@@ -83,14 +83,16 @@ class Agent:
         ) = None,
         model: Model | None | str = None,
         session: RSession | None = None,
+        ctx: Any | None = None,
         **kwargs: Any,
     ):
         self.name = name
         self.instructions = instructions
         self.model = model
         self.session = session
+        self.ctx = ctx
 
-        self.agent = BasicAgent(
+        self.agent = BasicAgent[ctx](
             name=self.name,
             instructions=self.instructions,
             model=self.model,
@@ -105,7 +107,9 @@ class Agent:
         **kwargs: Any,
     ) -> RunResultStreaming:
         agent = self.agent.clone(output_type=output_type, **kwargs)
-        return Runner.run_streamed(agent, input=input, session=session or self.session)
+        return Runner.run_streamed(
+            agent, input=input, session=session or self.session, context=self.ctx
+        )
 
     async def run(
         self,
@@ -119,6 +123,7 @@ class Agent:
             agent,
             input=input,  # pyright: ignore[reportArgumentType]
             session=session or self.session,
+            context=self.ctx,
         )
 
         tokens = Tokens(
