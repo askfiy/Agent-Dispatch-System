@@ -1,10 +1,11 @@
 import uuid
+import json
 import datetime
 from typing import Any
 
-from pydantic import field_serializer
+from pydantic import field_serializer, model_validator, Field
 
-from core.shared.enums import TaskState
+from core.shared.enums import TaskState, MessageRole
 from core.shared.base.models import BaseModel
 
 from ..tasks_chat.models import TaskChatInCrudModel
@@ -26,6 +27,16 @@ class TaskInXyzModel(BaseModel):
     created_at: datetime.datetime
 
     workspace: TaskWorkspaceInCrudModel
+
+    require_user_input: dict[str, Any] = Field(default_factory=dict)
+    chats: list[TaskChatInCrudModel] = Field(exclude=True)
+
+    @model_validator(mode="after")
+    def _require_user_input_validator(self) -> "TaskInXyzModel":
+        if self.chats and self.chats[0].role == MessageRole.ASSISTANT:
+            self.require_user_input = json.loads(self.chats[0].message)
+
+        return self
 
 
 class TaskInCrudModel(BaseModel):

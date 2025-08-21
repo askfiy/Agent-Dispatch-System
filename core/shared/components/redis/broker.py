@@ -9,6 +9,8 @@ from redis.typing import FieldT, EncodableT
 from redis.exceptions import ResponseError
 from pydantic import BaseModel, Field
 
+from core.shared.database.redis import get_client
+
 RbrokerMessage: TypeAlias = Any
 
 
@@ -33,10 +35,13 @@ class RBroker:
     基于 Redis Streams 实现的发布订阅系统
     """
 
-    def __init__(self, redis_client: redis.Redis):
-        self._client = redis_client
+    def __init__(self):
         self._consumer_tasks: list[asyncio.Task[None]] = []
         self._dlq_maxlen = 1000
+
+    @property
+    def _client(self):
+        return get_client()
 
     async def _handle_callback_ack(
         self,

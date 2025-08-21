@@ -3,6 +3,7 @@ import typing
 from typing import Any
 
 import redis.asyncio as redis
+from core.shared.database.redis import get_client
 
 
 class RCacher:
@@ -11,8 +12,9 @@ class RCacher:
     在创建客户端时设置 decode_responses=True.
     """
 
-    def __init__(self, redis_client: redis.Redis):
-        self._client = redis_client
+    @property
+    def _client(self):
+        return get_client()
 
     async def has(self, key: str) -> bool:
         return await self._client.exists(key) > 0

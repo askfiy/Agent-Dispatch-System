@@ -16,7 +16,7 @@ from .repository import TasksCrudRepository
 
 
 async def get_or_404(repo: TasksCrudRepository, pk: int):
-    db_obj = await repo.get(pk=pk)
+    db_obj = await repo.get(pk=pk, joined_loads=[Tasks.workspace])
     if not db_obj:
         raise ServiceNotFoundException(f"任务: {pk} 不存在")
 

@@ -66,7 +66,7 @@ class TaskDispatchRefactorInfoOutput(LLMOutputModel):
     )
 
     prd: str = Field(
-        description="The Product Requirements Document (PRD). It must include background, objectives, description, execution plan, etc. A PRD is not necessary if no task needs to be created.",
+        description="The Product Requirements Document (PRD). It must include background, objectives, description, execution plan.",
         examples=[prompt.get_prd_example()],
     )
 
@@ -146,16 +146,22 @@ class TaskDispatchGeneratorNextStateOutput(LLMOutputModel):
     state: AgentTaskState = Field(
         description="The new task state.", examples=[AgentTaskState.ACTIVATING.value]
     )
-    notify_user: str | None = Field(
+    notify_user: str = Field(
         description="Information to notify the user. This should only be filled when the new task state is 'WAITING'. This field must contain explicit content, and any information requiring user confirmation must be written in full.",
         examples=[
             "The meeting outline has been successfully drafted, but some necessary information is required to proceed with the task, such as the list of attendees, their contact information, and confirmation on whether the meeting outline meets expectations."
         ],
+        default_factory=str,
     )
-    replenish: list[str] | None = Field(
+    replenish: list[str] = Field(
+        default_factory=list,
         description="A list of information to request from the user. This should only be filled when the new task state is 'WAITING'. This field must be structured and contain a prompt for each item the user needs to provide.",
         examples=[
-            "['1. Please provide the list of attendees.', '2. Please provide the contact information for the attendees. E.g., John Doe www.example.mail ...', '3. Please confirm the meeting outline.']"
+            [
+                "1. Please provide the list of attendees.",
+                "2. Please provide the contact information for the attendees. E.g., John Doe www.example.mail ...",
+                "3. Please confirm the meeting outline.",
+            ]
         ],
     )
     next_execute_time: LLMTimeField | None = Field(

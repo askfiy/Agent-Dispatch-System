@@ -29,6 +29,76 @@ controller = fastapi.APIRouter(prefix="/tasks", tags=["tasks"])
 
 
 @controller.get(
+    path="/get-by-id",
+    name="根据 pk 获取某个 task",
+    status_code=fastapi.status.HTTP_200_OK,
+    response_model=ResponseModel[TaskInXyzModel],
+)
+async def get_by_id(
+    task_id: int = fastapi.Query(description="任务 ID"),
+    session: AsyncSession = Depends(get_async_session),
+) -> ResponseModel[TaskInXyzModel]:
+    db_obj = await service.get(task_id=task_id, session=session)
+    return ResponseModel(result=TaskInXyzModel.model_validate(db_obj))
+
+
+@controller.post(
+    path="/get-by-sessions",
+    name="根据 sessionID 获取所有任务",
+    status_code=fastapi.status.HTTP_200_OK,
+    response_model=ResponseModel[list[TaskInXyzModel]],
+)
+async def get_by_sessions(
+    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
+    state: Literal["waiting", "finished", "failed", "in_progress"]
+    | None = fastapi.Body(default=None, embed=True),
+    session: AsyncSession = Depends(get_async_session),
+) -> ResponseModel[list[TaskInXyzModel]]:
+    result = await service.get_by_sessions(
+        session_ids=session_ids, state=state, session=session
+    )
+    return ResponseModel(
+        result=[TaskInXyzModel.model_validate(task) for task in result]
+    )
+
+
+@controller.post(
+    path="/get-by-keywords-sessions",
+    name="根据 sessionID 和 自然语言筛选出所有任务",
+    status_code=fastapi.status.HTTP_200_OK,
+    response_model=ResponseModel[list[TaskInXyzModel]],
+)
+async def get_by_keywords_and_sessions(
+    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
+    keywords: str = fastapi.Body(embed=True),
+    session: AsyncSession = Depends(get_async_session),
+) -> ResponseModel[list[TaskInXyzModel]]:
+    result = await service.get_by_keywords_and_sessions(
+        session_ids=session_ids, keywords=keywords, session=session
+    )
+    return ResponseModel(
+        result=[TaskInXyzModel.model_validate(task) for task in result]
+    )
+
+
+@controller.post(
+    path="/get-count-by-sessions",
+    name="根据 sessionID 获取所有特定状态的任务数量",
+    status_code=fastapi.status.HTTP_200_OK,
+    response_model=ResponseModel[int],
+)
+async def get_count_by_sessions(
+    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
+    state: TaskState = fastapi.Body(default=TaskState.FINISHED, embed=True),
+    session: AsyncSession = Depends(get_async_session),
+) -> ResponseModel[int]:
+    result = await service.get_count_by_sessions(
+        session=session, session_ids=session_ids, state=state
+    )
+    return ResponseModel(result=result)
+
+
+@controller.get(
     path="",
     name="获取所有 task",
     status_code=fastapi.status.HTTP_200_OK,
@@ -102,57 +172,3 @@ async def delete(
     return ResponseModel(result=result)
 
 
-@controller.post(
-    path="/get-by-sessions",
-    name="根据 sessionID 获取所有任务",
-    status_code=fastapi.status.HTTP_200_OK,
-    response_model=ResponseModel[list[TaskInXyzModel]],
-)
-async def get_by_sessions(
-    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
-    state: Literal["waiting", "finished", "failed", "in_progress"]
-    | None = fastapi.Body(default=None, embed=True),
-    session: AsyncSession = Depends(get_async_session),
-) -> ResponseModel[list[TaskInXyzModel]]:
-    result = await service.get_by_sessions(
-        session_ids=session_ids, state=state, session=session
-    )
-    return ResponseModel(
-        result=[TaskInXyzModel.model_validate(task) for task in result]
-    )
-
-
-@controller.post(
-    path="/get-by-keywords-sessions",
-    name="根据 sessionID 和 自然语言筛选出所有任务",
-    status_code=fastapi.status.HTTP_200_OK,
-    response_model=ResponseModel[list[TaskInXyzModel]],
-)
-async def get_by_keywords_and_sessions(
-    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
-    keywords: str = fastapi.Body(embed=True),
-    session: AsyncSession = Depends(get_async_session),
-) -> ResponseModel[list[TaskInXyzModel]]:
-    result = await service.get_by_keywords_and_sessions(
-        session_ids=session_ids, keywords=keywords, session=session
-    )
-    return ResponseModel(
-        result=[TaskInXyzModel.model_validate(task) for task in result]
-    )
-
-
-@controller.post(
-    path="/get-count-by-sessions",
-    name="根据 sessionID 获取所有特定状态的任务数量",
-    status_code=fastapi.status.HTTP_200_OK,
-    response_model=ResponseModel[int],
-)
-async def get_count_by_sessions(
-    session_ids: list[str] = fastapi.Body(default_factory=list, embed=True),
-    state: TaskState = fastapi.Body(default=TaskState.FINISHED, embed=True),
-    session: AsyncSession = Depends(get_async_session),
-) -> ResponseModel[int]:
-    result = await service.get_count_by_sessions(
-        session=session, session_ids=session_ids, state=state
-    )
-    return ResponseModel(result=result)

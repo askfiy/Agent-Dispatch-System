@@ -173,7 +173,7 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
         task = db_obj
 
         # 软删除 tasks
-        task = await super().delete(db_obj)
+        # task = await super().delete(db_obj)
 
         soft_delete_coroutines = [
             self.session.execute(
@@ -191,6 +191,14 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
                 TasksHistory,
             ]
         ]
+
+        soft_delete_coroutines.append(
+            self.session.execute(
+                sa.update(self.model)
+                .where(self.model.id == db_obj.id)
+                .values(is_deleted=True, deleted_at=sa.func.now())
+            )
+        )
 
         if db_obj.workspace_id:
             soft_delete_coroutines.insert(
@@ -283,6 +291,7 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
         )
 
         stmt = stmt.options(joinedload(self.model.workspace))
+        stmt = stmt.options(joinedload(self.model.chats))
 
         if state == TaskState.WAITING.value:
             stmt = stmt.where(self.model.state == TaskState.WAITING)
@@ -345,6 +354,7 @@ class TasksCrudRepository(BaseCRUDRepository[Tasks]):
         )
 
         stmt = stmt.options(joinedload(self.model.workspace))
+        stmt = stmt.options(joinedload(self.model.chats))
 
         result = await self.session.execute(stmt)
         return result.scalars().unique().all()

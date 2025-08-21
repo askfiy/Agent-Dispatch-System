@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from typing import Any, TypeVar
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from agents import (
     Agent as BasicAgent,
@@ -30,29 +31,24 @@ class Tokens(BaseModel):
 async def get_mcp_servers(mcp_servers: dict[str, Any]):
     servers: list[MCPServer] = []
 
-    for server_name, server_config in mcp_servers.items():
-        url = server_config.get("url")
-        if url:
-            server = MCPServerSse(
-                params=MCPServerSseParams(
-                    url=url,
-                    headers=server_config.get("headers", {}) or {},
-                    timeout=200.0,
-                    sse_read_timeout=300.0,
-                ),
-                cache_tools_list=True,
-                name=server_name,
-                client_session_timeout_seconds=300.0,
-            )
+    async with AsyncExitStack() as stack:
+        for server_name, server_config in mcp_servers.items():
+            url = server_config.get("url")
+            if url:
+                server = MCPServerSse(
+                    params=MCPServerSseParams(
+                        url=url,
+                        headers=server_config.get("headers", {}) or {},
+                        timeout=200.0,
+                        sse_read_timeout=300.0,
+                    ),
+                    cache_tools_list=True,
+                    name=server_name,
+                    client_session_timeout_seconds=300.0,
+                )
 
-        else:
-            continue
-
-        # else:
-        #     server = MCPServerStdio(name=server_name, params=server_config)
-
-        await server.connect()
-        servers.append(server)
+                await server.connect()
+                servers.append(server)
 
     return servers
 
@@ -70,6 +66,41 @@ class Agent:
     - 支持 Agent 每次 run 的时候生成不同的结构化对象.
     """
 
+    @asynccontextmanager
+    async def _build_agent(self, output_type: type[OutputSchemaType] | None = None):
+        servers: list[MCPServer] = []
+
+        async with AsyncExitStack() as stack:
+            for server_name, server_config in self.mcp_server_infos.items():
+                url = server_config.get("url")
+
+                if url:
+                    server = await stack.enter_async_context(
+                        MCPServerSse(
+                            params=MCPServerSseParams(
+                                url=url,
+                                headers=server_config.get("headers", {}) or {},
+                                timeout=200.0,
+                                sse_read_timeout=300.0,
+                            ),
+                            cache_tools_list=True,
+                            name=server_name,
+                            client_session_timeout_seconds=300.0,
+                        )
+                    )
+
+                    servers.append(server)
+
+            agent = BasicAgent[self.ctx](
+                name=self.name,
+                instructions=self.instructions,
+                output_type=output_type,
+                model=self.model,
+                **self.kwargs,
+            )
+
+            yield agent
+
     def __init__(
         self,
         name: str,
@@ -82,6 +113,7 @@ class Agent:
             | None
         ) = None,
         model: Model | None | str = None,
+        mcp_server_infos: dict[str, Any] | None = None,
         session: RSession | None = None,
         ctx: Any | None = None,
         **kwargs: Any,
@@ -89,27 +121,22 @@ class Agent:
         self.name = name
         self.instructions = instructions
         self.model = model
+        self.mcp_server_infos = mcp_server_infos or {}
         self.session = session
         self.ctx = ctx
+        self.kwargs = kwargs
 
-        self.agent = BasicAgent[ctx](
-            name=self.name,
-            instructions=self.instructions,
-            model=self.model,
-            **kwargs,
-        )
-
-    def run_streamed(
+    async def run_streamed(
         self,
         input: str | list[TResponseInputItem],
         session: RSession | None = None,
         output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
     ) -> RunResultStreaming:
-        agent = self.agent.clone(output_type=output_type, **kwargs)
-        return Runner.run_streamed(
-            agent, input=input, session=session or self.session, context=self.ctx
-        )
+        async with self._build_agent(output_type) as agent:
+            return Runner.run_streamed(
+                agent, input=input, session=session or self.session, context=self.ctx
+            )
 
     async def run(
         self,
@@ -118,13 +145,13 @@ class Agent:
         output_type: type[OutputSchemaType] | None = None,
         **kwargs: Any,
     ) -> tuple[RunResult | OutputSchemaType, Tokens]:
-        agent = self.agent.clone(output_type=output_type, **kwargs)
-        run_result = await Runner.run(
-            agent,
-            input=input,  # pyright: ignore[reportArgumentType]
-            session=session or self.session,
-            context=self.ctx,
-        )
+        async with self._build_agent(output_type) as agent:
+            run_result = await Runner.run(
+                agent,
+                input=input,  # pyright: ignore[reportArgumentType]
+                session=session or self.session,
+                context=self.ctx,
+            )
 
         tokens = Tokens(
             input_tokens=run_result.context_wrapper.usage.input_tokens or 0,

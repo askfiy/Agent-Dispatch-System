@@ -14,9 +14,13 @@ class Settings(BaseSettings):
 
     SYNC_DB_URL: str = Field(examples=["mysql+pymysql://root:123@127.0.0.1:3306/db1"])
     ASYNC_DB_URL: str = Field(examples=["mysql+asyncmy://root:123@127.0.0.1:3306/db1"])
-    OPENAI_API_KEY: str = Field(examples=["sk-proj-..."])
-    OPENAI_MODEL: str = Field(examples=["gpt-4o-mini"])
-    ASYNC_REDIS_URL: str = Field(examples=["redis://127.0.0.1:6379"])
+    REDIS_SENTINELS: str = Field(
+        examples=["127.0.0.1:6379;127.0.0.1:6380;127.0.0.1:6381;"]
+    )
+    REDIS_MASTER_NAME: str = Field(examples=["mymaster"])
+    REDIS_PASSWORD: str = Field(examples=["..."])
+    REDIS_SENTINEL_PASSWORD: str = Field(examples=["..."])
+    REDIS_DB: str = Field(examples=["1"])
 
     @field_validator("SYNC_DB_URL", "ASYNC_DB_URL", mode="before")
     @classmethod
@@ -30,19 +34,6 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid MySQL DSN: {e}") from e
 
         return str(db_url)
-
-    @field_validator("ASYNC_REDIS_URL", mode="before")
-    @classmethod
-    def _validate_redis_url(cls, redis_url: Any) -> str:
-        if not isinstance(redis_url, str):
-            raise TypeError("Redis URL must be a string")
-        try:
-            # 验证是否符合 RedisDsn 类型.
-            RedisDsn(redis_url)
-        except Exception as e:
-            raise ValueError(f"Invalid redis_url DSN: {e}") from e
-
-        return str(redis_url)
 
 
 env_helper = Settings()  # pyright: ignore[reportCallIssue]

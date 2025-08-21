@@ -1,4 +1,5 @@
 import typing
+import json
 import uuid
 import asyncio
 import logging
@@ -9,7 +10,8 @@ from dataclasses import dataclass
 import traceback
 
 from agents import Model, RunContextWrapper, function_tool
-from contextlib import asynccontextmanager
+from agents.mcp import MCPServer, MCPServerSse, MCPServerSseParams
+from contextlib import asynccontextmanager, AsyncExitStack
 
 from core.shared.database.session import AsyncTxSession
 from core.shared.base.models import LLMTimeField
@@ -213,7 +215,6 @@ class TaskAgent(Agent):
         response, tokens = await super().run(
             input=input, session=session, output_type=output_type, **kwargs
         )
-
         return response, tokens
 
     async def create_task(self, create_model: TaskDispatchCreateModel) -> Tasks | str:
@@ -551,6 +552,14 @@ class TaskAgent(Agent):
         try:
             # 处理用户反馈的信息. 更新 Process 并将任务重新入队.
             async with get_async_tx_session_direct() as session:
+                await tasks_service.update(
+                    task_id=task_id,
+                    update_model=TaskUpdateModel(
+                        state=TaskState.SCHEDULING,
+                    ),
+                    session=session,
+                )
+
                 task = await tasks_service.get(task_id=task_id, session=session)
                 notify_user = await tasks_chat_service.get_last_message(
                     task_id=task_id, role=MessageRole.ASSISTANT, session=session
@@ -592,12 +601,6 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
-                await tasks_service.update(
-                    task_id=task.id,
-                    update_model=TaskUpdateModel(state=TaskState.SCHEDULING),
-                    session=session,
-                )
-
                 await tasks_workspace_service.update(
                     workspace_id=task.workspace_id,
                     update_model=TaskWorkspaceUpdateModel(
@@ -627,8 +630,8 @@ class TaskAgent(Agent):
                 await audits_log_service.create(
                     create_model=AuditLLMlogModel(
                         session_id=task.session_id,
-                        thinking="任务补充信息时报错了, 但我们不重置其状态.",
-                        message=str(exc),
+                        thinking=f"任务补充信息时报错了, 但我们不重置其状态. {str(exc)}",
+                        message=traceback.format_exc(),
                         tokens=Tokens().model_dump(),
                     ).to_audit_log(),
                     session=session,
@@ -755,13 +758,12 @@ class TaskAgent(Agent):
                 await self.execute_task_unit(task_id=task_id)
             elif response_model.state == AgentTaskState.SCHEDULING:
                 async with get_async_tx_session_direct() as session:
-                    # 计算下次执行时间
                     await tasks_service.update(
                         task_id=task.id,
                         update_model=TaskUpdateModel(
                             expect_execute_time=typing.cast(
                                 "LLMTimeField", response_model.next_execute_time
-                            ).get_utc_datetime()
+                            ).get_utc_datetime(),
                         ),
                         session=session,
                     )
@@ -775,22 +777,28 @@ class TaskAgent(Agent):
                         create_model=TaskChatCreateModel(
                             role=MessageRole.ASSISTANT,
                             task_id=task.id,
-                            message=typing.cast("str", response_model.notify_user),
+                            message=json.dumps(
+                                {
+                                    "message": response_model.notify_user,
+                                    "replenish": response_model.replenish,
+                                },
+                            ),
                         ),
                         session=session,
                     )
                     await self.next_state(
                         task_id, new_state=response_model.state, session=session
                     )
+
                 # 调用业务层. 补充信息
                 await XyzPlatformServer.send_task_provision(
                     session_id=task.session_id,
                     task_id=str(task.id),
-                    description=typing.cast("str", response_model.notify_user),
+                    description=response_model.notify_user,
                     task_name=task.name,
                     created_at=task.created_at.isoformat(),
                     state=TaskState.WAITING.value,
-                    replenish=typing.cast("list[str]", response_model.replenish),
+                    replenish=response_model.replenish,
                 )
             else:
                 async with get_async_tx_session_direct() as session:
@@ -966,9 +974,9 @@ class TaskAgent(Agent):
                 session=session,
             )
 
+        try:
             await XyzPlatformServer.send_task_refresh(session_id=task.session_id)
 
-        try:
             # 生成新的 prd
             response_model, tokens = await self.run(
                 output_type=TaskDispatchRefactorInfoOutput,
@@ -976,7 +984,7 @@ class TaskAgent(Agent):
                     {
                         "role": MessageRole.SYSTEM,
                         "content": prompt.task_refactor_prompt(
-                            TaskDispatchGeneratorInfoOutput
+                            TaskDispatchRefactorInfoOutput
                         ),
                     },
                     {
@@ -1052,12 +1060,11 @@ class TaskAgent(Agent):
                 return task
 
 
-@asynccontextmanager
 async def get_agent_factory(
     task_id: int | None = None,
     session_id: str | None = None,
     mcp_server_infos: dict[str, Any] | None = None,
-) -> AsyncGenerator[TaskAgent]:
+) -> TaskAgent:
     model = None
     mcp_server_infos = mcp_server_infos or {}
 
@@ -1078,13 +1085,11 @@ async def get_agent_factory(
         session_id=session_id
     )
 
-    mcp_servers = await get_mcp_servers(mcp_servers=mcp_server_infos)
-
     agent = TaskAgent(
         name="Task-Dispatch-Agent",
         instructions=prompt.get_instructions(),
         model=model,
-        mcp_servers=mcp_servers,
+        mcp_server_infos=mcp_server_infos,
         tools=[send_a2a_message, get_xyz_contenxt],
         ctx=XyzContext(
             session_id=session_id,
@@ -1092,10 +1097,7 @@ async def get_agent_factory(
             user_id=convsess_info["userId"],
         ),
     )
-
-    yield agent
-
-    await close_mcp_servers(mcp_servers)
+    return agent
 
 
 async def call_soon_task(task_id: int):
@@ -1126,45 +1128,44 @@ async def create_task(create_model: TaskDispatchCreateModel) -> Tasks | str:
     """
     创建任务
     """
-    async with get_agent_factory(
+    agent = await get_agent_factory(
         session_id=create_model.session_id,
         mcp_server_infos=create_model.mcp_server_infos,
-    ) as agent:
-        return await agent.create_task(create_model=create_model)
+    )
+
+    return await agent.create_task(create_model=create_model)
 
 
-async def refactor_task(update_model: TaskDispatchRefactorModel) -> Tasks:
+async def refactor_task(update_model: TaskDispatchRefactorModel) -> None:
     """
     重构任务
     """
-    async with get_agent_factory(task_id=update_model.task_id) as agent:
-        return await agent.refactor_task(update_model)
+    agent = await get_agent_factory(task_id=update_model.task_id)
+    asyncio.create_task(agent.refactor_task(update_model))
 
 
 async def execute_task(task_id: int):
     """
     开始执行任务
     """
-    async with get_agent_factory(task_id=task_id) as agent:
-        return await agent.execute_task(task_id=task_id)
+    agent = await get_agent_factory(task_id=task_id)
+    return await agent.execute_task(task_id=task_id)
 
 
 async def running_task(task_id: int):
     """
     继续运行任务
     """
-    async with get_agent_factory(task_id=task_id) as agent:
-        return await agent.running_task(task_id=task_id)
+    agent = await get_agent_factory(task_id=task_id)
+    return await agent.running_task(task_id=task_id)
 
 
 async def add_user_message(task_id: int, user_message: str) -> None:
     """
     用户补充任务信息
     """
-    async with get_agent_factory(task_id=task_id) as agent:
-        asyncio.create_task(
-            agent.waiting_task(task_id=task_id, user_message=user_message)
-        )
+    agent = await get_agent_factory(task_id=task_id)
+    asyncio.create_task(agent.waiting_task(task_id=task_id, user_message=user_message))
 
 
 async def review_task(task_id: int):
