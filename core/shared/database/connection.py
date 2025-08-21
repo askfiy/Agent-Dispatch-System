@@ -1,20 +1,10 @@
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from xyz_databases.dependencies.session import get_async_session
 
-from core.config import env_helper
+from xyz_databases.dependencies.session import engine_async, AsyncBindSession
 
+engine = engine_async
 
-engine = create_async_engine(
-    env_helper.ASYNC_DB_URL,
-    echo=False,
-)
-
-
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    autocommit=False,
-    autoflush=False,
-    expire_on_commit=False,
-    class_=AsyncSession,  # 明确指定使用 AsyncSession
-)
+AsyncSessionLocal = AsyncBindSession
 
 __all__ = ["engine", "AsyncSessionLocal"]

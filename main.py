@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 import fastapi
 from fastapi import Request, Response, Depends
 
+import core.config
 from core.router import api_router
 from core.logger import setup_logging
 from core.handle import exception_handler, service_exception_handler

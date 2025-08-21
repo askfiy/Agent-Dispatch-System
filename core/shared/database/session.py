@@ -3,24 +3,20 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .connection import engine, AsyncSessionLocal
+from .connection import AsyncSessionLocal
 
 AsyncTxSession: TypeAlias = AsyncSession
 
 
 async def get_async_session():
-    async with AsyncSessionLocal(bind=engine) as session:
+    async with AsyncSessionLocal() as session:
         yield session
 
 
 async def get_async_tx_session():
     async with AsyncSessionLocal() as session:
-        try:
+        async with session.begin():
             yield session
-            await session.commit()
-        except Exception as exc:
-            await session.rollback()
-            raise exc
 
 
 get_async_session_direct = asynccontextmanager(get_async_session)

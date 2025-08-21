@@ -4,6 +4,7 @@
 # Default environment is 'local' if not specified.
 # Usage: make serve ENV="test"
 ENV ?= local
+CONFIG_ENV ?= local
 
 # Default migration message if not specified.
 # Usage: make db-generate M="your message"

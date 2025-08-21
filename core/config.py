@@ -1,39 +1,59 @@
 import os
-from typing import Any
+import typing
+from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field, MySQLDsn, RedisDsn, field_validator
+from dotenv import load_dotenv
+from pydantic import Field, BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from xyz_config_system import config_env_create
+from xyz_config_system.core.enums import SecretPlatform
+from xyz_config_system.core.base import GlobalBaseEnv
 
-env = os.getenv("ENV", "local")
-configure_path = os.path.join(".", ".env", f".{env}.env")
+
+env = os.getenv("ENV")
+
+assert env, "ENV is not set"
+
+ENV: Literal["test", "local", "esk-test", "esk-dev", "prod"] = typing.cast(
+    "Literal['test', 'local', 'esk-test', 'esk-dev', 'prod']", env.lower()
+)
+
+ROOT = Path(__file__).parent.absolute()
+env_file_path = ROOT.joinpath("../.env")
+load_dotenv(env_file_path, override=True)
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(case_sensitive=True, env_file=configure_path)
+xyz_celery_config_env = config_env_create(ENV, SecretPlatform.XYZ_CELERY)
+xyz_celery_env = xyz_celery_config_env.xyz_celery
 
-    SYNC_DB_URL: str = Field(examples=["mysql+pymysql://root:123@127.0.0.1:3306/db1"])
-    ASYNC_DB_URL: str = Field(examples=["mysql+asyncmy://root:123@127.0.0.1:3306/db1"])
+
+xyz_platform_config_env = config_env_create(ENV, SecretPlatform.XYZ_PLATFORM)
+xyz_platfrom_env = xyz_platform_config_env.xyz_platform
+
+
+class Settings(GlobalBaseEnv):
+    N8N_RDS_HOST: str = xyz_platfrom_env.N8N_RDS_HOST
+    N8N_RDS_PORT: int = xyz_platfrom_env.N8N_RDS_PORT
+    N8N_RDS_NAME: str = xyz_platfrom_env.N8N_RDS_NAME
+
     REDIS_SENTINELS: str = Field(
-        examples=["127.0.0.1:6379;127.0.0.1:6380;127.0.0.1:6381;"]
+        examples=["127.0.0.1:6379;127.0.0.1:6380;127.0.0.1:6381;"],
+        default=xyz_celery_env.CELERY_REDIS_SENTINELS,
     )
-    REDIS_MASTER_NAME: str = Field(examples=["mymaster"])
-    REDIS_PASSWORD: str = Field(examples=["..."])
-    REDIS_SENTINEL_PASSWORD: str = Field(examples=["..."])
-    REDIS_DB: str = Field(examples=["1"])
 
-    @field_validator("SYNC_DB_URL", "ASYNC_DB_URL", mode="before")
-    @classmethod
-    def _validate_db_url(cls, db_url: Any) -> str:
-        if not isinstance(db_url, str):
-            raise TypeError("Database URL must be a string")
-        try:
-            # 验证是否符合 MySQLDsn 类型.
-            MySQLDsn(db_url)
-        except Exception as e:
-            raise ValueError(f"Invalid MySQL DSN: {e}") from e
-
-        return str(db_url)
+    REDIS_MASTER_NAME: str = Field(
+        examples=["mymaster"], default=xyz_celery_env.CELERY_REDIS_MASTER_NAME
+    )
+    REDIS_PASSWORD: str = Field(
+        examples=["..."], default=xyz_celery_env.CELERY_REDIS_PASSWORD
+    )
+    REDIS_SENTINEL_PASSWORD: str = Field(
+        examples=["..."], default=xyz_celery_env.CELERY_REDIS_SENTINEL_PASSWORD
+    )
+    REDIS_DB: str = Field(examples=["1"], default=xyz_celery_env.CELERY_REDIS_DB)
 
 
 env_helper = Settings()  # pyright: ignore[reportCallIssue]
+
