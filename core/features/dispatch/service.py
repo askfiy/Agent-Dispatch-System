@@ -3,22 +3,18 @@ import json
 import uuid
 import asyncio
 import logging
-from collections.abc import Sequence, AsyncGenerator
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, override
 from dataclasses import dataclass
 import traceback
 
 from agents import Model, RunContextWrapper, function_tool
-from agents.mcp import MCPServer, MCPServerSse, MCPServerSseParams
-from contextlib import asynccontextmanager, AsyncExitStack
 
 from core.shared.database.session import AsyncTxSession
 from core.shared.base.models import LLMTimeField
 from core.shared.components.openai.agent import (
     Tokens,
-    get_mcp_servers,
-    close_mcp_servers,
 )
 from core.shared.globals import broker, Agent, RSession
 from core.shared.components.openai.agent import OutputSchemaType
@@ -311,8 +307,9 @@ class TaskAgent(Agent):
         async with get_async_tx_session_direct() as session:
             task = await tasks_service.get(task_id=task_id, session=session)
 
-            # 若当前轮次, 和上轮次均为空
-            if not task.curr_round_id and not task.prev_round_id:
+        # 若当前轮次, 和上轮次均为空
+        if not task.curr_round_id and not task.prev_round_id:
+            async with get_async_tx_session_direct() as session:
                 workspace = await tasks_workspace_service.get(
                     workspace_id=task.workspace_id, session=session
                 )
@@ -333,23 +330,24 @@ class TaskAgent(Agent):
                 )
                 response_model: TaskDispatchGeneratorPlanningOutput
 
-                await audits_log_service.create(
-                    create_model=AuditLLMlogModel(
-                        session_id=task.session_id,
-                        thinking=response_model.thinking,
-                        message="执行计划生成成功",
-                        tokens=tokens.model_dump(),
-                    ).to_audit_log(),
-                    session=session,
-                )
+                async with get_async_tx_session_direct() as session:
+                    await audits_log_service.create(
+                        create_model=AuditLLMlogModel(
+                            session_id=task.session_id,
+                            thinking=response_model.thinking,
+                            message="执行计划生成成功",
+                            tokens=tokens.model_dump(),
+                        ).to_audit_log(),
+                        session=session,
+                    )
 
-                await tasks_workspace_service.update(
-                    workspace_id=task.workspace_id,
-                    update_model=TaskWorkspaceUpdateModel(
-                        process=response_model.process
-                    ),
-                    session=session,
-                )
+                    await tasks_workspace_service.update(
+                        workspace_id=task.workspace_id,
+                        update_model=TaskWorkspaceUpdateModel(
+                            process=response_model.process
+                        ),
+                        session=session,
+                    )
 
                 self.model: Model
                 asyncio.create_task(
@@ -385,28 +383,29 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
-                # 运行执行单元
-                response_model, tokens = await self.run(
-                    input=[
-                        {
-                            "role": MessageRole.SYSTEM,
-                            "content": prompt.task_run_unit_prompt(
-                                output_cls=TaskDispatchExecuteUnitOutput,
-                                unit_content=prev_units_content,
-                                prd=prd,
-                                chats=chats,
-                                prd_created_time=prd_created_time,
-                            ),
-                        },
-                        {
-                            "role": MessageRole.USER,
-                            "content": unit.objective,
-                        },
-                    ],
-                    output_type=TaskDispatchExecuteUnitOutput,
-                )
-                response_model: TaskDispatchExecuteUnitOutput
+            # 运行执行单元
+            response_model, tokens = await self.run(
+                input=[
+                    {
+                        "role": MessageRole.SYSTEM,
+                        "content": prompt.task_run_unit_prompt(
+                            output_cls=TaskDispatchExecuteUnitOutput,
+                            unit_content=prev_units_content,
+                            prd=prd,
+                            chats=chats,
+                            prd_created_time=prd_created_time,
+                        ),
+                    },
+                    {
+                        "role": MessageRole.USER,
+                        "content": unit.objective,
+                    },
+                ],
+                output_type=TaskDispatchExecuteUnitOutput,
+            )
+            response_model: TaskDispatchExecuteUnitOutput
 
+            async with get_async_tx_session_direct() as session:
                 unit = await tasks_unit_service.update(
                     unit_id=unit_id,
                     update_model=TaskUnitUpdateModel(
@@ -425,16 +424,16 @@ class TaskAgent(Agent):
                     session=session,
                 )
 
-                asyncio.create_task(
-                    store_usage_by_session(
-                        source="Task-Executor-Unit",
-                        model_name=self.model.model,
-                        input_token=tokens.input_tokens,
-                        output_token=tokens.output_tokens,
-                        cache_token=tokens.cached_tokens,
-                        session_id=task.session_id,
-                    )
+            asyncio.create_task(
+                store_usage_by_session(
+                    source="Task-Executor-Unit",
+                    model_name=self.model.model,
+                    input_token=tokens.input_tokens,
+                    output_token=tokens.output_tokens,
+                    cache_token=tokens.cached_tokens,
+                    session_id=task.session_id,
                 )
+            )
 
         # 拿到所有的执行单元
         async with get_async_session_direct() as session:
@@ -488,21 +487,22 @@ class TaskAgent(Agent):
 
             process = workspace.process
 
-            # 拆解执行单元
-            response_model, tokens = await self.run(
-                output_type=TaskDispatchGeneratorExecuteUnitOutput,
-                input=[
-                    {
-                        "role": MessageRole.SYSTEM,
-                        "content": prompt.task_get_unit_prompt(
-                            output_cls=TaskDispatchGeneratorExecuteUnitOutput
-                        ),
-                    },
-                    {"role": MessageRole.USER, "content": process},
-                ],
-            )
-            response_model: TaskDispatchGeneratorExecuteUnitOutput
+        # 拆解执行单元
+        response_model, tokens = await self.run(
+            output_type=TaskDispatchGeneratorExecuteUnitOutput,
+            input=[
+                {
+                    "role": MessageRole.SYSTEM,
+                    "content": prompt.task_get_unit_prompt(
+                        output_cls=TaskDispatchGeneratorExecuteUnitOutput
+                    ),
+                },
+                {"role": MessageRole.USER, "content": process},
+            ],
+        )
+        response_model: TaskDispatchGeneratorExecuteUnitOutput
 
+        async with get_async_tx_session_direct() as session:
             # 派发轮次
             task = await tasks_service.update(
                 task_id=task.id,
@@ -523,17 +523,6 @@ class TaskAgent(Agent):
                 session=session,
             )
 
-            asyncio.create_task(
-                store_usage_by_session(
-                    source="Task-Generator-Unit",
-                    model_name=self.model.model,
-                    input_token=tokens.input_tokens,
-                    output_token=tokens.output_tokens,
-                    cache_token=tokens.cached_tokens,
-                    session_id=task.session_id,
-                )
-            )
-
             # 创建执行单元
             for unit in response_model.unit_list:
                 unit: TaskDispatchExecuteUnitInput
@@ -547,6 +536,17 @@ class TaskAgent(Agent):
                     ),
                     session=session,
                 )
+
+        asyncio.create_task(
+            store_usage_by_session(
+                source="Task-Generator-Unit",
+                model_name=self.model.model,
+                input_token=tokens.input_tokens,
+                output_token=tokens.output_tokens,
+                cache_token=tokens.cached_tokens,
+                session_id=task.session_id,
+            )
+        )
 
     async def waiting_task(self, task_id: int, user_message: str):
         try:
@@ -569,28 +569,29 @@ class TaskAgent(Agent):
                     workspace_id=task.workspace_id, session=session
                 )
 
-                # 更新执行计划
-                response_model, tokens = await self.run(
-                    output_type=TaskDispatchUpdatePlanningOutput,
-                    input=[
-                        {
-                            "role": MessageRole.SYSTEM,
-                            "content": prompt.task_waiting_handle_prompt(
-                                output_cls=TaskDispatchUpdatePlanningOutput
-                            ),
-                        },
-                        {
-                            "role": MessageRole.USER,
-                            "content": TaskDispatchUpdatePlanningInput(
-                                process=workspace.process,
-                                notify_user=notify_user.message,  # pyright: ignore[reportOptionalMemberAccess]
-                                user_message=user_message,
-                            ).to_json_markdown(),
-                        },
-                    ],
-                )
-                response_model: TaskDispatchUpdatePlanningOutput
+            # 更新执行计划
+            response_model, tokens = await self.run(
+                output_type=TaskDispatchUpdatePlanningOutput,
+                input=[
+                    {
+                        "role": MessageRole.SYSTEM,
+                        "content": prompt.task_waiting_handle_prompt(
+                            output_cls=TaskDispatchUpdatePlanningOutput
+                        ),
+                    },
+                    {
+                        "role": MessageRole.USER,
+                        "content": TaskDispatchUpdatePlanningInput(
+                            process=workspace.process,
+                            notify_user=notify_user.message,  # pyright: ignore[reportOptionalMemberAccess]
+                            user_message=user_message,
+                        ).to_json_markdown(),
+                    },
+                ],
+            )
+            response_model: TaskDispatchUpdatePlanningOutput
 
+            async with get_async_tx_session_direct() as session:
                 await audits_log_service.create(
                     create_model=AuditLLMlogModel(
                         session_id=task.session_id,
@@ -685,39 +686,38 @@ class TaskAgent(Agent):
                     for unit in curr_units
                 ]
 
-                # 根据 units 的反馈, 来更新当前的 process 以及任务状态
-                response_model, tokens = await self.run(
-                    output_type=TaskDispatchGeneratorNextStateOutput,
-                    input=[
-                        {
-                            "role": MessageRole.SYSTEM,
-                            "content": prompt.task_run_next_prompt(
-                                output_cls=TaskDispatchGeneratorNextStateOutput,
-                                unit_content=curr_units_content,
-                                chats=[
-                                    TaskChatInCrudModel.model_validate(
-                                        chat
-                                    ).model_dump()
-                                    for chat in task.chats
-                                ],
-                            ),
-                        },
-                        {"role": MessageRole.USER, "content": process},
-                    ],
-                )
-                response_model: TaskDispatchGeneratorNextStateOutput
+            # 根据 units 的反馈, 来更新当前的 process 以及任务状态
+            response_model, tokens = await self.run(
+                output_type=TaskDispatchGeneratorNextStateOutput,
+                input=[
+                    {
+                        "role": MessageRole.SYSTEM,
+                        "content": prompt.task_run_next_prompt(
+                            output_cls=TaskDispatchGeneratorNextStateOutput,
+                            unit_content=curr_units_content,
+                            chats=[
+                                TaskChatInCrudModel.model_validate(chat).model_dump()
+                                for chat in task.chats
+                            ],
+                        ),
+                    },
+                    {"role": MessageRole.USER, "content": process},
+                ],
+            )
+            response_model: TaskDispatchGeneratorNextStateOutput
 
-                asyncio.create_task(
-                    store_usage_by_session(
-                        source="Task-Execute-Continue",
-                        model_name=self.model.model,
-                        input_token=tokens.input_tokens,
-                        output_token=tokens.output_tokens,
-                        cache_token=tokens.cached_tokens,
-                        session_id=task.session_id,
-                    )
+            asyncio.create_task(
+                store_usage_by_session(
+                    source="Task-Execute-Continue",
+                    model_name=self.model.model,
+                    input_token=tokens.input_tokens,
+                    output_token=tokens.output_tokens,
+                    cache_token=tokens.cached_tokens,
+                    session_id=task.session_id,
                 )
+            )
 
+            async with get_async_tx_session_direct() as session:
                 await tasks_history_service.create(
                     create_model=TaskHistoryCreateModel(
                         task_id=task.id,
@@ -782,6 +782,7 @@ class TaskAgent(Agent):
                                     "message": response_model.notify_user,
                                     "replenish": response_model.replenish,
                                 },
+                                ensure_ascii=False,
                             ),
                         ),
                         session=session,
@@ -808,38 +809,40 @@ class TaskAgent(Agent):
                     all_units = [
                         TaskUnitDispatchInput.model_validate(unit) for unit in all_units
                     ]
-                    result_model, tokens = await self.run(
-                        output_type=TaskDispatchGeneratorResultOutput,
-                        input=[
-                            {
-                                "role": MessageRole.SYSTEM,
-                                "content": prompt.task_run_result_prompt(
-                                    TaskDispatchGeneratorResultOutput
-                                ),
-                            },
-                            {
-                                "role": MessageRole.USER,
-                                "content": TaskDispatchGeneratorResultInput(
-                                    prd=workspace.prd,
-                                    process=workspace.process,
-                                    all_units=all_units,
-                                ).to_json_markdown(),
-                            },
-                        ],
-                    )
-                    result_model: TaskDispatchGeneratorResultOutput
 
-                    asyncio.create_task(
-                        store_usage_by_session(
-                            source="Task-Generator-Result",
-                            model_name=self.model.model,
-                            input_token=tokens.input_tokens,
-                            output_token=tokens.output_tokens,
-                            cache_token=tokens.cached_tokens,
-                            session_id=task.session_id,
-                        )
-                    )
+                result_model, tokens = await self.run(
+                    output_type=TaskDispatchGeneratorResultOutput,
+                    input=[
+                        {
+                            "role": MessageRole.SYSTEM,
+                            "content": prompt.task_run_result_prompt(
+                                TaskDispatchGeneratorResultOutput
+                            ),
+                        },
+                        {
+                            "role": MessageRole.USER,
+                            "content": TaskDispatchGeneratorResultInput(
+                                prd=workspace.prd,
+                                process=workspace.process,
+                                all_units=all_units,
+                            ).to_json_markdown(),
+                        },
+                    ],
+                )
+                result_model: TaskDispatchGeneratorResultOutput
 
+                asyncio.create_task(
+                    store_usage_by_session(
+                        source="Task-Generator-Result",
+                        model_name=self.model.model,
+                        input_token=tokens.input_tokens,
+                        output_token=tokens.output_tokens,
+                        cache_token=tokens.cached_tokens,
+                        session_id=task.session_id,
+                    )
+                )
+
+                async with get_async_tx_session_direct() as session:
                     await tasks_workspace_service.update(
                         workspace_id=task.workspace_id,
                         update_model=TaskWorkspaceUpdateModel(
@@ -863,12 +866,12 @@ class TaskAgent(Agent):
                         task_id, new_state=response_model.state, session=session
                     )
 
-                    await XyzPlatformServer.send_task_result_notify(
-                        task_id=str(task_id),
-                        task_name=task.name,
-                        state=response_model.state,
-                        session_id=task.session_id,
-                    )
+                await XyzPlatformServer.send_task_result_notify(
+                    task_id=str(task_id),
+                    task_name=task.name,
+                    state=response_model.state,
+                    session_id=task.session_id,
+                )
 
         except Exception:
             logger.error(f"执行任务时失败: {traceback.format_exc()}")
@@ -1025,6 +1028,7 @@ class TaskAgent(Agent):
                     update_model=TaskUpdateModel(
                         name=response_model.name,
                         state=TaskState.SCHEDULING,
+                        original_user_input=update_model.update_user_prompt,
                         prev_round_id=None,
                         curr_round_id=None,
                         lasted_execute_time=None,
@@ -1184,7 +1188,7 @@ async def review_task(task_id: int):
         await audits_log_service.create(
             create_model=AuditLLMlogModel(
                 session_id=task.session_id,
-                thinking="任务补充信息时报错了, 但我们不重置其状态.",
+                thinking="任务超时了.",
                 message=f"任务 {task_id} 调度超过特定时间. 最后进入调度队列的时间: {task.lasted_execute_time}",
                 tokens=Tokens().model_dump(),
             ).to_audit_log(),
